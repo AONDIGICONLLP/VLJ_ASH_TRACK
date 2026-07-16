@@ -1,53 +1,44 @@
-/**
- * Below are the colors that are used in the app. The colors are defined in the light and dark mode.
- * There are many other ways to style your app. For example, [Nativewind](https://www.nativewind.dev/), [Tamagui](https://tamagui.dev/), [unistyles](https://reactnativeunistyles.vercel.app), etc.
- */
-
-import { Platform } from 'react-native';
-
-const tintColorLight = '#0a7ea4';
-const tintColorDark = '#fff';
-
 export const Colors = {
-  light: {
-    text: '#11181C',
-    background: '#fff',
-    tint: tintColorLight,
-    icon: '#687076',
-    tabIconDefault: '#687076',
-    tabIconSelected: tintColorLight,
-  },
-  dark: {
-    text: '#ECEDEE',
-    background: '#151718',
-    tint: tintColorDark,
-    icon: '#9BA1A6',
-    tabIconDefault: '#9BA1A6',
-    tabIconSelected: tintColorDark,
-  },
-};
+  primary: "#71B32F",
+  primaryDark: "#588F24",
+  primaryLight: "#8FC957",
+  secondary: "#005298",
+  secondaryDark: "#003B70",
+  secondaryLight: "#3378B5",
+  background: "#F3F6FB",
+  card: "#FFFFFF",
+  border: "#E2E8F0",
+  text: "#0F172A",
+  textMuted: "#64748B",
+  danger: "#DC2626",
+  dangerDark: "#991B1B",
+  white: "#FFFFFF",
+} as const;
 
-export const Fonts = Platform.select({
-  ios: {
-    /** iOS `UIFontDescriptorSystemDesignDefault` */
-    sans: 'system-ui',
-    /** iOS `UIFontDescriptorSystemDesignSerif` */
-    serif: 'ui-serif',
-    /** iOS `UIFontDescriptorSystemDesignRounded` */
-    rounded: 'ui-rounded',
-    /** iOS `UIFontDescriptorSystemDesignMonospaced` */
-    mono: 'ui-monospace',
-  },
-  default: {
-    sans: 'normal',
-    serif: 'serif',
-    rounded: 'normal',
-    mono: 'monospace',
-  },
-  web: {
-    sans: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
-    serif: "Georgia, 'Times New Roman', serif",
-    rounded: "'SF Pro Rounded', 'Hiragino Maru Gothic ProN', Meiryo, 'MS PGothic', sans-serif",
-    mono: "SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
-  },
-});
+// Ready-made gradient stops for expo-linear-gradient, kept alongside Colors so
+// every "premium" surface (headers, hero, buttons, dialogs) pulls from one place.
+export const Gradients = {
+  brand: ["#005298", "#71B32F"] as [string, string],
+  header: ["#003B70", "#005298"] as [string, string],
+  hero: ["#003B70", "#005298", "#588F24"] as [string, string, string],
+  primaryButton: ["#588F24", "#71B32F"] as [string, string],
+  secondaryButton: ["#003B70", "#005298"] as [string, string],
+  success: ["#588F24", "#71B32F"] as [string, string],
+  danger: ["#991B1B", "#DC2626"] as [string, string],
+} as const;
+
+export const Spacing = {
+  xs: 4,
+  sm: 8,
+  md: 16,
+  lg: 24,
+  xl: 32,
+} as const;
+
+export const Radius = {
+  sm: 10,
+  md: 16,
+  lg: 24,
+  xl: 28,
+  pill: 999,
+} as const;
