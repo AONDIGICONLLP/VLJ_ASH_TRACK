@@ -1,156 +1,314 @@
 import { useCallback, useMemo, useState } from "react";
 import { useFocusEffect } from "expo-router";
-import { Image, ScrollView, StyleSheet, View } from "react-native";
-import { Chip, Text, TextInput } from "react-native-paper";
+import { ScrollView, StyleSheet, View } from "react-native";
+import { ActivityIndicator, Chip, Text, TextInput } from "react-native-paper";
+import { LinearGradient } from "expo-linear-gradient";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { Colors, Gradients, Radius, Spacing } from "@/constants/theme";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { Colors, Gradients, Radius, Spacing, TabBarMetrics } from "@/constants/theme";
 import { EmptyState } from "@/components/empty-state";
 import { StatCard } from "@/components/stat-card";
-import { useRoleGuard } from "@/lib/use-role-guard";
-import { formatRelativeTime } from "@/lib/format";
-import { getTrips } from "@/lib/storage";
-import type { TripRecord, TripType } from "@/types";
+import { useAuth } from "@/lib/auth-context";
+import { useAnyPermissionGuard } from "@/lib/use-permission-guard";
+import { formatRelativeTime, parseSqlDateTime } from "@/lib/format";
+import { ApiError, getRolesApi, getUserHistoryApi, type UserHistory } from "@/lib/api";
 
-const FILTERS: { label: string; value: TripType | "all" }[] = [
+type Category = "user" | "rfid" | "reader" | "trip";
+
+type FeedItem = {
+  key: string;
+  category: Category;
+  timestamp: number;
+  title: string;
+  lines: string[];
+  active?: boolean;
+  searchText: string;
+};
+
+const CATEGORY_META: Record<
+  Category,
+  {
+    label: string;
+    icon: keyof typeof MaterialCommunityIcons.glyphMap;
+    colors: [string, string];
+    tint: string;
+    text: string;
+  }
+> = {
+  user: {
+    label: "User",
+    icon: "account-outline",
+    colors: Gradients.primaryButton,
+    tint: "#E3F2D3",
+    text: Colors.primaryDark,
+  },
+  rfid: {
+    label: "RFID",
+    icon: "tag-outline",
+    colors: Gradients.secondaryButton,
+    tint: "#D6E8FA",
+    text: Colors.secondary,
+  },
+  reader: {
+    label: "Reader",
+    icon: "cellphone-cog",
+    colors: Gradients.danger,
+    tint: "#FBE3DA",
+    text: Colors.dangerDark,
+  },
+  trip: {
+    label: "Trip",
+    icon: "flag-checkered",
+    colors: Gradients.brand,
+    tint: "#E4E9F5",
+    text: Colors.secondaryDark,
+  },
+};
+
+const FILTERS: { label: string; value: "all" | Category }[] = [
   { label: "All", value: "all" },
-  { label: "Device Register", value: "start" },
-  { label: "Trip End", value: "end" },
+  { label: "Users", value: "user" },
+  { label: "RFID", value: "rfid" },
+  { label: "Readers", value: "reader" },
+  { label: "Trips", value: "trip" },
 ];
 
+function buildFeed(history: UserHistory, roleNames: string[]): FeedItem[] {
+  const items: FeedItem[] = [];
+
+  history.users.forEach((u) => {
+    const timestamp = parseSqlDateTime(u.updatedAt ?? u.createdAt) ?? 0;
+    const roleName = roleNames[u.roleID - 1] ?? `Role ${u.roleID}`;
+    items.push({
+      key: `user-${u.id}`,
+      category: "user",
+      timestamp,
+      title: u.name || u.username,
+      lines: [`@${u.username} · ${roleName}`, u.company].filter(Boolean),
+      active: !!u.isActive,
+      searchText: `${u.username} ${u.name} ${u.email} ${u.company}`.toLowerCase(),
+    });
+  });
+
+  history.rfid.forEach((r) => {
+    const timestamp = parseSqlDateTime(r.updatedAt ?? r.createdAt) ?? 0;
+    items.push({
+      key: `rfid-${r.id}`,
+      category: "rfid",
+      timestamp,
+      title: r.rfid,
+      lines: [`Vehicle: ${r.deviceID}`],
+      active: !!r.isActive,
+      searchText: `${r.rfid} ${r.deviceID}`.toLowerCase(),
+    });
+  });
+
+  history.readers.forEach((rd) => {
+    const timestamp = parseSqlDateTime(rd.updatedAt ?? rd.createdAt) ?? 0;
+    items.push({
+      key: `reader-${rd.id}`,
+      category: "reader",
+      timestamp,
+      title: rd.readerID,
+      lines: [`Zone: ${rd.zoneID}`],
+      active: !!rd.isActive,
+      searchText: `${rd.readerID} ${rd.zoneID}`.toLowerCase(),
+    });
+  });
+
+  // Shape unverified — the live endpoint has only ever returned an empty
+  // array here. Extract common-sounding fields defensively rather than
+  // assuming a schema.
+  history.trips.forEach((raw, index) => {
+    const createdAt = typeof raw.createdAt === "string" ? raw.createdAt : undefined;
+    const timestamp = parseSqlDateTime(createdAt) ?? 0;
+    const id = raw.id;
+    const deviceID = raw.deviceID ?? raw.vehicleNo;
+    const rfid = raw.rfid;
+    items.push({
+      key: `trip-${typeof id === "number" || typeof id === "string" ? id : index}`,
+      category: "trip",
+      timestamp,
+      title: deviceID ? String(deviceID) : "Trip record",
+      lines: rfid ? [`RFID: ${String(rfid)}`] : [],
+      searchText: JSON.stringify(raw).toLowerCase(),
+    });
+  });
+
+  return items.sort((a, b) => b.timestamp - a.timestamp);
+}
+
 export default function HistoryScreen() {
-  const { allowed, loading } = useRoleGuard(["admin", "superadmin"]);
-  const [trips, setTrips] = useState<TripRecord[]>([]);
-  const [filter, setFilter] = useState<TripType | "all">("all");
+  const { allowed, loading: guardLoading } = useAnyPermissionGuard();
+  const { session } = useAuth();
+  const insets = useSafeAreaInsets();
+  const listBottomPadding = insets.bottom + TabBarMetrics.height + TabBarMetrics.bottomMargin + Spacing.md;
+  // Only roleID 1 (the top-level admin account) sees the full audit trail —
+  // every other login only ever sees their own trip history here.
+  const isFullAccess = String(session?.roleID) === "1";
+
+  const [history, setHistory] = useState<UserHistory | null>(null);
+  const [roleNames, setRoleNames] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [filter, setFilter] = useState<"all" | Category>("all");
   const [search, setSearch] = useState("");
 
-  const loadTrips = useCallback(() => {
-    getTrips().then((all) => all.sort((a, b) => b.createdAt - a.createdAt)).then(setTrips);
-  }, []);
+  const loadHistory = useCallback(() => {
+    setLoading(true);
+    setLoadError("");
+    const rolesPromise = isFullAccess ? getRolesApi().catch(() => [] as string[]) : Promise.resolve([]);
+    Promise.all([getUserHistoryApi(), rolesPromise])
+      .then(([data, roles]) => {
+        setHistory(data);
+        setRoleNames(roles);
+      })
+      .catch((e) => {
+        setHistory(null);
+        setLoadError(e instanceof ApiError ? e.message : "Could not load history.");
+      })
+      .finally(() => setLoading(false));
+  }, [isFullAccess]);
 
-  useFocusEffect(loadTrips);
+  useFocusEffect(loadHistory);
+
+  const feed = useMemo(() => {
+    if (!history) return [];
+    const full = buildFeed(history, roleNames);
+    return isFullAccess ? full : full.filter((item) => item.category === "trip");
+  }, [history, roleNames, isFullAccess]);
 
   const stats = useMemo(
     () => ({
-      total: trips.length,
-      register: trips.filter((t) => t.type === "start").length,
-      tripOut: trips.filter((t) => t.type === "end").length,
+      users: history?.users.length ?? 0,
+      rfid: history?.rfid.length ?? 0,
+      readers: history?.readers.length ?? 0,
+      trips: history?.trips.length ?? 0,
     }),
-    [trips]
+    [history]
   );
 
-  const filtered = trips.filter((trip) => {
-    if (filter !== "all" && trip.type !== filter) return false;
+  const filtered = feed.filter((item) => {
+    if (filter !== "all" && item.category !== filter) return false;
     if (!search.trim()) return true;
-    const needle = search.trim().toUpperCase();
-    return trip.vehicleNo.includes(needle) || trip.rfidTag.includes(needle);
+    return item.searchText.includes(search.trim().toLowerCase());
   });
 
-  if (loading || !allowed) return null;
+  if (guardLoading || !allowed) return null;
 
   return (
     <View style={styles.safe}>
-      <View style={styles.statsRow}>
-        <StatCard icon="format-list-bulleted" label="Total" value={stats.total} colors={Gradients.header} />
-        <StatCard icon="login" label="Register" value={stats.register} colors={Gradients.primaryButton} />
-        <StatCard icon="flag-checkered" label="Trip End" value={stats.tripOut} colors={Gradients.secondaryButton} />
+      <View style={styles.statsGrid}>
+        {isFullAccess && (
+          <>
+            <StatCard icon="account-group-outline" label="Users" value={stats.users} colors={Gradients.primaryButton} />
+            <StatCard icon="tag-multiple-outline" label="RFID Tags" value={stats.rfid} colors={Gradients.secondaryButton} />
+            <StatCard icon="cellphone-cog" label="Readers" value={stats.readers} colors={Gradients.danger} />
+          </>
+        )}
+        <StatCard icon="flag-checkered" label="Trips" value={stats.trips} colors={Gradients.brand} />
       </View>
 
       <TextInput
-        placeholder="Search Vehicle / Tag"
+        placeholder="Search history"
         value={search}
-        onChangeText={(v) => setSearch(v.toUpperCase())}
+        onChangeText={setSearch}
         mode="outlined"
         style={styles.search}
-        autoCapitalize="characters"
         left={<TextInput.Icon icon="magnify" />}
       />
 
-      <View style={styles.chipRow}>
-        {FILTERS.map((f) => (
-          <Chip
-            key={f.value}
-            selected={filter === f.value}
-            onPress={() => setFilter(f.value)}
-            style={styles.filterChip}
-          >
-            {f.label}
-          </Chip>
-        ))}
-      </View>
+      {isFullAccess && (
+        <View style={styles.chipRow}>
+          {FILTERS.map((f) => (
+            <Chip
+              key={f.value}
+              selected={filter === f.value}
+              onPress={() => setFilter(f.value)}
+              style={styles.filterChip}
+            >
+              {f.label}
+            </Chip>
+          ))}
+        </View>
+      )}
 
-      <ScrollView contentContainerStyle={styles.list}>
-        {filtered.length === 0 && (
-          <EmptyState icon="map-marker-path" message="No history records found." />
-        )}
-        {filtered.map((trip, index) => {
-          const isStart = trip.type === "start";
-          const dotColor = isStart ? Colors.primary : Colors.secondary;
-          return (
-            <View key={trip.id} style={styles.row}>
-              <View style={styles.rail}>
-                <View style={[styles.dot, { backgroundColor: dotColor }]} />
-                {index < filtered.length - 1 && <View style={styles.railLine} />}
-              </View>
-
-              <View style={styles.card}>
-                <View style={styles.cardHeader}>
-                  <View style={styles.cardHeaderLeft}>
-                    {trip.imageUri && (
-                      <Image source={{ uri: trip.imageUri }} style={styles.headerThumb} />
-                    )}
-                    <Text style={styles.vehicleNo}>{trip.vehicleNo}</Text>
-                  </View>
-                  <View style={[styles.typeTag, { backgroundColor: isStart ? "#E3F2D3" : "#D6E8FA" }]}>
-                    <MaterialCommunityIcons
-                      name={isStart ? "login" : "flag-checkered"}
-                      size={12}
-                      color={dotColor}
-                    />
-                    <Text style={[styles.typeTagText, { color: dotColor }]}>
-                      {isStart ? "Device Register" : "Trip End"}
-                    </Text>
-                  </View>
-                </View>
-
-                <View style={styles.metaRow}>
-                  <MaterialCommunityIcons name="tag-outline" size={14} color={Colors.textMuted} />
-                  <Text style={styles.detail}>{trip.rfidTag || "-"}</Text>
-                </View>
-                <View style={styles.metaRow}>
-                  <MaterialCommunityIcons
-                    name={isStart ? "map-marker-outline" : "flag-checkered"}
-                    size={14}
-                    color={Colors.textMuted}
+      {loading && !history ? (
+        <ActivityIndicator style={styles.loader} color={Colors.secondary} />
+      ) : loadError ? (
+        <EmptyState icon="alert-circle-outline" message={loadError} />
+      ) : (
+        <ScrollView contentContainerStyle={{ paddingBottom: listBottomPadding }}>
+          {filtered.length === 0 && (
+            <EmptyState icon="map-marker-path" message="No history records found." />
+          )}
+          {filtered.map((item, index) => {
+            const meta = CATEGORY_META[item.category];
+            return (
+              <View key={item.key} style={styles.row}>
+                <View style={styles.rail}>
+                  <LinearGradient
+                    colors={meta.colors}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.dot}
                   />
-                  <Text style={styles.detail}>{trip.place}</Text>
-                </View>
-                <View style={styles.metaRow}>
-                  <MaterialCommunityIcons name="cellphone-cog" size={14} color={Colors.textMuted} />
-                  <Text style={styles.detail}>{trip.deviceName}</Text>
+                  {index < filtered.length - 1 && <View style={styles.railLine} />}
                 </View>
 
-                <View style={styles.footerRow}>
-                  <View style={styles.coordChip}>
-                    <MaterialCommunityIcons name="crosshairs-gps" size={12} color={Colors.secondary} />
-                    <Text style={styles.coordText}>
-                      {trip.latitude}, {trip.longitude}
+                <View style={styles.card}>
+                  <View style={styles.cardHeader}>
+                    <View style={styles.cardHeaderLeft}>
+                      <LinearGradient
+                        colors={meta.colors}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={styles.iconWrap}
+                      >
+                        <MaterialCommunityIcons name={meta.icon} size={16} color={Colors.white} />
+                      </LinearGradient>
+                      <Text style={styles.itemTitle} numberOfLines={1}>
+                        {item.title}
+                      </Text>
+                    </View>
+                    <View style={styles.badgeGroup}>
+                      {item.active === false && (
+                        <View style={styles.inactiveBadge}>
+                          <Text style={styles.inactiveBadgeText}>Inactive</Text>
+                        </View>
+                      )}
+                      <View style={[styles.typeTag, { backgroundColor: meta.tint }]}>
+                        <Text style={[styles.typeTagText, { color: meta.text }]}>{meta.label}</Text>
+                      </View>
+                    </View>
+                  </View>
+
+                  {item.lines.map((line, lineIndex) => (
+                    <Text key={lineIndex} style={styles.detail}>
+                      {line}
+                    </Text>
+                  ))}
+
+                  <View style={styles.cardFooter}>
+                    <Text style={styles.timestamp}>
+                      {item.timestamp ? formatRelativeTime(item.timestamp) : "-"}
                     </Text>
                   </View>
-                  <Text style={styles.timestamp}>{formatRelativeTime(trip.createdAt)}</Text>
                 </View>
               </View>
-            </View>
-          );
-        })}
-      </ScrollView>
+            );
+          })}
+        </ScrollView>
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background, padding: Spacing.md },
-  statsRow: {
+  statsGrid: {
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: Spacing.sm,
     marginBottom: Spacing.md,
   },
@@ -162,12 +320,13 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: Spacing.xs,
     marginBottom: Spacing.md,
+    flexWrap: "wrap",
   },
   filterChip: {
     backgroundColor: Colors.white,
   },
-  list: {
-    paddingBottom: 60,
+  loader: {
+    marginTop: Spacing.xl,
   },
   row: {
     flexDirection: "row",
@@ -208,26 +367,33 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     marginBottom: Spacing.xs,
+    gap: Spacing.sm,
   },
   cardHeaderLeft: {
     flexDirection: "row",
     alignItems: "center",
     gap: Spacing.sm,
+    flex: 1,
   },
-  headerThumb: {
+  iconWrap: {
     width: 28,
     height: 28,
-    borderRadius: 8,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
   },
-  vehicleNo: {
-    fontSize: 16,
+  itemTitle: {
+    fontSize: 15,
     fontWeight: "800",
     color: Colors.text,
+    flexShrink: 1,
   },
-  typeTag: {
+  badgeGroup: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 4,
+    gap: 6,
+  },
+  typeTag: {
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: Radius.pill,
@@ -236,38 +402,30 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: "800",
   },
-  metaRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    marginTop: 3,
-  },
-  detail: {
-    fontSize: 13,
-    color: Colors.textMuted,
-  },
-  footerRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginTop: Spacing.sm,
-    paddingTop: Spacing.sm,
-    borderTopWidth: 1,
-    borderTopColor: "#F1F5F9",
-  },
-  coordChip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    backgroundColor: "#EAF2FA",
+  inactiveBadge: {
+    backgroundColor: "#FBE9E3",
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: Radius.pill,
   },
-  coordText: {
-    fontSize: 11,
-    color: Colors.secondary,
-    fontWeight: "600",
+  inactiveBadgeText: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: Colors.danger,
+  },
+  detail: {
+    fontSize: 13,
+    color: Colors.textMuted,
+    marginTop: 2,
+  },
+  cardFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    marginTop: Spacing.sm,
+    paddingTop: Spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: "#F1F5F9",
   },
   timestamp: {
     fontSize: 11,

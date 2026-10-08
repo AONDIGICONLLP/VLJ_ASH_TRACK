@@ -3,14 +3,14 @@ import { useFocusEffect } from "expo-router";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { Button, Card, IconButton, Text, TextInput } from "react-native-paper";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { Colors, Gradients, Radius, Spacing } from "@/constants/theme";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { Colors, Gradients, Radius, Spacing, TabBarMetrics } from "@/constants/theme";
 import DialogComponent from "@/components/dialog";
 import { DropdownField } from "@/components/dropdown-field";
 import { EmptyState } from "@/components/empty-state";
-import { GradientButton } from "@/components/gradient-button";
 import { GradientFab } from "@/components/gradient-fab";
 import { ResultDialog } from "@/components/result-dialog";
-import { useRoleGuard } from "@/lib/use-role-guard";
+import { usePermission, usePermissionGuard } from "@/lib/use-permission-guard";
 import { getDeviceId } from "@/lib/device";
 import { ApiError, getZonesApi, parseZoneCoordinates, registerDeviceApi } from "@/lib/api";
 import type { Zone } from "@/lib/api";
@@ -18,7 +18,13 @@ import { deleteDevice, getDevices } from "@/lib/storage";
 import type { DeviceRecord } from "@/types";
 
 export default function DeviceCreationScreen() {
-  const { allowed, loading } = useRoleGuard(["user", "admin", "superadmin"]);
+  const { allowed, loading } = usePermissionGuard("HandheldReaderRegistration");
+  const { canAdd } = usePermission("HandheldReaderRegistration");
+  const insets = useSafeAreaInsets();
+  const listBottomPadding = insets.bottom + TabBarMetrics.height + TabBarMetrics.bottomMargin + Spacing.md;
+  // Sits just above the floating tab bar's top edge, with the same 14px
+  // clearance the tab bar itself keeps above the safe area.
+  const fabBottom = insets.bottom + TabBarMetrics.height + TabBarMetrics.bottomMargin + 14;
   const [devices, setDevices] = useState<DeviceRecord[]>([]);
   const [modalVisible, setModalVisible] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<DeviceRecord | null>(null);
@@ -28,6 +34,7 @@ export default function DeviceCreationScreen() {
   const [zones, setZones] = useState<Zone[]>([]);
   const [zonesLoading, setZonesLoading] = useState(false);
   const [selectedZone, setSelectedZone] = useState<Zone | null>(null);
+  const [imageRequired, setImageRequired] = useState(true);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<{ variant: "success" | "error"; message: string } | null>(
@@ -49,7 +56,6 @@ export default function DeviceCreationScreen() {
       .then(setZones)
       .catch((e) => {
         const message = e instanceof ApiError ? e.message : "Could not load zones.";
-        console.log("[zones]", message);
         setZones([]);
         setError(message);
       })
@@ -60,6 +66,7 @@ export default function DeviceCreationScreen() {
     setModalVisible(false);
     setDeviceName("");
     setSelectedZone(null);
+    setImageRequired(true);
     setError("");
   }
 
@@ -69,16 +76,17 @@ export default function DeviceCreationScreen() {
     try {
       const readerID = deviceId.trim();
       const zoneID = (selectedZone?.zoneId ?? "").trim();
-      console.log(JSON.stringify({ readerID, zoneID }, null, 1));
-      const message = await registerDeviceApi(readerID, zoneID);
+      const payload = { readerID, zoneID, imageRequired: imageRequired ? 0 : 1 };
+      console.log("[device-creation] submitting:", payload);
+      const message = await registerDeviceApi(readerID, zoneID, imageRequired ? 0 : 1);
+      console.log("[device-creation] response:", message);
 
       closeModal();
       setResult({ variant: "success", message });
     } catch (e) {
-      setResult({
-        variant: "error",
-        message: e instanceof ApiError ? e.message : "Something went wrong. Try again.",
-      });
+      const message = e instanceof ApiError ? e.message : "Something went wrong. Try again.";
+      console.log("[device-creation] response:", message);
+      setResult({ variant: "error", message });
     } finally {
       setSubmitting(false);
     }
@@ -97,7 +105,7 @@ export default function DeviceCreationScreen() {
 
   return (
     <View style={styles.safe}>
-      <ScrollView contentContainerStyle={styles.list}>
+      <ScrollView contentContainerStyle={[styles.list, { paddingBottom: listBottomPadding }]}>
         {devices.length === 0 && (
           <EmptyState
             icon="cellphone-cog"
@@ -138,7 +146,7 @@ export default function DeviceCreationScreen() {
         ))}
       </ScrollView>
 
-      <GradientFab style={styles.fab} onPress={() => setModalVisible(true)} />
+      <GradientFab style={[styles.fab, { bottom: fabBottom }]} onPress={() => setModalVisible(true)} disabled={!canAdd} />
 
       <DialogComponent
         visible={modalVisible}
@@ -146,52 +154,73 @@ export default function DeviceCreationScreen() {
         title="Register Device"
         icon="cellphone-cog"
         cornerRadius={24}
+        fullScreen
+        actions={[
+          { label: "Cancel", onPress: closeModal, disabled: submitting },
+          { label: "Submit", mode: "contained", onPress: handleSubmit, loading: submitting },
+        ]}
       >
-        <TextInput
-          label="Device Name"
-          value={deviceName}
-          onChangeText={setDeviceName}
-          mode="outlined"
-          style={styles.input}
-        />
-        <TextInput label="Device ID" value={deviceId} disabled mode="outlined" style={styles.input} />
-        <DropdownField
-          label="Zone"
-          value={selectedZone?.zoneId ?? null}
-          options={zones.map((z) => ({
-            label: z.zoneName ? `${z.zoneName}${z.zoneType ? ` (${z.zoneType})` : ""}` : z.zoneId,
-            value: z.zoneId,
-          }))}
-          onSelect={(id) => setSelectedZone(zones.find((z) => z.zoneId === id) ?? null)}
-          disabled={zonesLoading}
-          emptyMessage={zonesLoading ? "Loading zones..." : error || "No zones found."}
-        />
-        {selectedZone && (selectedZone.zoneName || selectedZone.zoneType || selectedZonePoints.length > 0 || selectedZone.radius != null) && (
-          <View style={styles.autofillBox}>
-            {!!selectedZone.zoneName && (
-              <Text style={styles.detail}>Zone Name: {selectedZone.zoneName}</Text>
-            )}
-            {!!selectedZone.zoneType && (
-              <Text style={styles.detail}>Zone Type: {selectedZone.zoneType}</Text>
-            )}
-            {selectedZonePoints.map((point, index) => (
-              <Text key={`${point.latitude}-${point.longitude}-${index}`} style={styles.detail}>
-                {selectedZonePoints.length > 1 ? `Point ${index + 1}: ` : "Lat/Long: "}
-                {point.latitude}, {point.longitude}
-              </Text>
-            ))}
-            {selectedZone.zoneType !== "Polygon" && selectedZone.radius != null && (
-              <Text style={styles.detail}>Radius: {selectedZone.radius} m</Text>
-            )}
+        <ScrollView keyboardShouldPersistTaps="handled" style={styles.formScroll}>
+          <TextInput
+            label="Device Name"
+            value={deviceName}
+            onChangeText={setDeviceName}
+            mode="outlined"
+            style={styles.input}
+          />
+          <TextInput label="Device ID" value={deviceId} disabled mode="outlined" style={styles.input} />
+          <DropdownField
+            label="Zone"
+            value={selectedZone?.zoneId ?? null}
+            options={zones.map((z) => ({
+              label: z.zoneName ? `${z.zoneName}${z.zoneType ? ` (${z.zoneType})` : ""}` : z.zoneId,
+              value: z.zoneId,
+            }))}
+            onSelect={(id) => setSelectedZone(zones.find((z) => z.zoneId === id) ?? null)}
+            disabled={zonesLoading}
+            emptyMessage={zonesLoading ? "Loading zones..." : error || "No zones found."}
+          />
+          {selectedZone && (selectedZone.zoneName || selectedZone.zoneType || selectedZonePoints.length > 0 || selectedZone.radius != null) && (
+            <View style={styles.autofillBox}>
+              {!!selectedZone.zoneName && (
+                <Text style={styles.detail}>Zone Name: {selectedZone.zoneName}</Text>
+              )}
+              {!!selectedZone.zoneType && (
+                <Text style={styles.detail}>Zone Type: {selectedZone.zoneType}</Text>
+              )}
+              {selectedZonePoints.map((point, index) => (
+                <Text key={`${point.latitude}-${point.longitude}-${index}`} style={styles.detail}>
+                  {selectedZonePoints.length > 1 ? `Point ${index + 1}: ` : "Lat/Long: "}
+                  {point.latitude}, {point.longitude}
+                </Text>
+              ))}
+              {selectedZone.zoneType !== "Polygon" && selectedZone.radius != null && (
+                <Text style={styles.detail}>Radius: {selectedZone.radius} m</Text>
+              )}
+            </View>
+          )}
+          <Text style={styles.fieldLabel}>Image Required</Text>
+          <View style={styles.statusToggle}>
+            <Button
+              mode={imageRequired ? "contained" : "outlined"}
+              onPress={() => setImageRequired(true)}
+              compact
+              style={styles.statusBtn}
+            >
+              Yes
+            </Button>
+            <Button
+              mode={!imageRequired ? "contained" : "outlined"}
+              onPress={() => setImageRequired(false)}
+              compact
+              style={styles.statusBtn}
+            >
+              No
+            </Button>
           </View>
-        )}
-        {!!error && <Text style={styles.error}>{error}</Text>}
-        <View style={styles.actionRow}>
-          <Button onPress={closeModal} disabled={submitting}>
-            Cancel
-          </Button>
-          <GradientButton label="Submit" onPress={handleSubmit} loading={submitting} />
-        </View>
+
+          {!!error && <Text style={styles.error}>{error}</Text>}
+        </ScrollView>
       </DialogComponent>
 
       <ResultDialog
@@ -223,7 +252,7 @@ export default function DeviceCreationScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
-  list: { padding: Spacing.md, paddingBottom: 120 },
+  list: { padding: Spacing.md },
   card: {
     marginBottom: Spacing.md,
     borderRadius: Radius.md,
@@ -263,10 +292,28 @@ const styles = StyleSheet.create({
   fab: {
     position: "absolute",
     right: 16,
-    bottom: 96,
   },
   input: {
     marginBottom: Spacing.md,
+  },
+  formScroll: {
+    flex: 1,
+  },
+  fieldLabel: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: Colors.textMuted,
+    letterSpacing: 1,
+    textTransform: "uppercase",
+    marginBottom: Spacing.xs,
+  },
+  statusToggle: {
+    flexDirection: "row",
+    gap: Spacing.sm,
+    marginBottom: Spacing.md,
+  },
+  statusBtn: {
+    flex: 1,
   },
   autofillBox: {
     backgroundColor: "#EEF3F2",
@@ -278,12 +325,6 @@ const styles = StyleSheet.create({
     color: Colors.danger,
     marginBottom: Spacing.md,
     fontSize: 13,
-  },
-  actionRow: {
-    flexDirection: "row",
-    justifyContent: "flex-end",
-    alignItems: "center",
-    gap: Spacing.sm,
   },
   highlight: {
     fontWeight: "700",

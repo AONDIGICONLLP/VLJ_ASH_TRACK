@@ -2,7 +2,7 @@ import { useState } from "react";
 import { router } from "expo-router";
 import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, View } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
-import { Button, Surface, Text, TextInput } from "react-native-paper";
+import { Surface, Text, TextInput } from "react-native-paper";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { Colors, Gradients, Radius, Spacing } from "@/constants/theme";
 import { AshBackground } from "@/components/ash-background";
@@ -30,7 +30,6 @@ export default function LoginScreen() {
     setError("");
     try {
       const data = await loginApi(username.trim(), password);
-      console.log("[login] response:", JSON.stringify(data, null, 2));
       await login({
         username: data.username,
         name: data.name,
@@ -40,9 +39,9 @@ export default function LoginScreen() {
         roleID: data.roleID,
         permissions: data.permissions,
         token: data.token,
-        // TEMPORARY: real roleID -> app role mapping not defined yet.
-        role: "superadmin",
       });
+      console.log(data);
+      
       setLoading(false);
       setCelebrate(true);
       setTimeout(() => {
@@ -121,14 +120,6 @@ export default function LoginScreen() {
               icon="login"
               fullWidth
             />
-
-            <Button
-              mode="text"
-              onPress={() => router.push("/register")}
-              style={styles.registerLinkBtn}
-            >
-              Don&apos;t have an account? Register
-            </Button>
           </Surface>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -217,8 +208,5 @@ const styles = StyleSheet.create({
     color: Colors.danger,
     marginBottom: Spacing.md,
     fontSize: 13,
-  },
-  registerLinkBtn: {
-    marginTop: Spacing.sm,
   },
 });

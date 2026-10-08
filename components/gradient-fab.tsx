@@ -1,4 +1,4 @@
-import { Pressable, StyleSheet, ViewStyle } from "react-native";
+import { Pressable, StyleProp, StyleSheet, ViewStyle } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { Colors, Gradients } from "@/constants/theme";
@@ -7,7 +7,7 @@ type Props = {
   icon?: keyof typeof MaterialCommunityIcons.glyphMap;
   onPress: () => void;
   disabled?: boolean;
-  style?: ViewStyle;
+  style?: StyleProp<ViewStyle>;
 };
 
 export function GradientFab({ icon = "plus", onPress, disabled, style }: Props) {

@@ -30,6 +30,21 @@ export function formatStampCoordinate(value: number, positiveSuffix: string, neg
   return `${Math.abs(value).toFixed(6)}° ${value < 0 ? negativeSuffix : positiveSuffix}`;
 }
 
+// PHP strtotime-parseable "YYYY-MM-DD HH:mm:ss", in the device's local time.
+export function formatSqlDateTime(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+// Inverse of formatSqlDateTime — parses "YYYY-MM-DD HH:mm:ss" (as returned by
+// the history API) into an epoch timestamp. The space is swapped for a "T"
+// since some JS engines won't reliably parse the space-separated form.
+export function parseSqlDateTime(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = new Date(value.replace(" ", "T"));
+  return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
+}
+
 export function formatRelativeTime(timestamp: number): string {
   const diffMs = Date.now() - timestamp;
   const diffSec = Math.floor(diffMs / 1000);

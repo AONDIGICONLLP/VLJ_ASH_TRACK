@@ -1,8 +1,9 @@
 import { ReactNode } from "react";
-import { Pressable, StyleSheet, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, useWindowDimensions, View } from "react-native";
 import { Button, Portal, Surface, Text } from "react-native-paper";
 import { LinearGradient } from "expo-linear-gradient";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Colors, Gradients, Radius, Spacing } from "@/constants/theme";
 import { GradientButton } from "@/components/gradient-button";
 
@@ -42,23 +43,50 @@ export default function DialogComponent({
   actions = [],
   fullScreen = false,
 }: Props) {
+  const insets = useSafeAreaInsets();
+  const { height: windowHeight } = useWindowDimensions();
+
   if (!visible) return null;
+
+  // Cap the dialog to the visible screen (minus safe-area insets) so it can
+  // never render taller than the device's usable area — on small/handheld
+  // screens a tall body (e.g. many zone points) would otherwise push the
+  // action buttons below the fold with no way to reach them.
+  const topInset = (position === "top" ? 60 : Spacing.lg) + insets.top;
+  const bottomInset = Spacing.lg + insets.bottom;
+  const dialogMaxHeight = Math.max(windowHeight - topInset - bottomInset, 260);
+  const bodyMaxHeight = Math.max(dialogMaxHeight - 150, 100);
+
+  // A fullScreen dialog is meant to cover the entire device screen edge to
+  // edge (only safe-area insets carve out the notch/status bar/nav bar) —
+  // no floating-card margin and no rounded corners, unlike the small
+  // centered dialog which keeps its margin and corner radius.
+  const overlayPadding = fullScreen
+    ? { paddingTop: insets.top, paddingBottom: insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }
+    : { paddingTop: topInset, paddingBottom: bottomInset };
 
   return (
     <Portal>
       <Pressable
-        style={[styles.overlay, position === "top" ? styles.overlayTop : styles.overlayCenter]}
+        style={[
+          styles.overlay,
+          position === "top" ? styles.overlayTop : styles.overlayCenter,
+          overlayPadding,
+        ]}
         onPress={onDismiss}
       >
         <Pressable
           onPress={() => {}}
-          style={[styles.cardWrapper, fullScreen && styles.cardWrapperFull]}
+          style={[
+            styles.cardWrapper,
+            fullScreen ? styles.cardWrapperFull : { maxHeight: dialogMaxHeight },
+          ]}
         >
           <Surface
             style={[
               styles.card,
               fullScreen && styles.cardFull,
-              { backgroundColor, borderRadius: cornerRadius },
+              { backgroundColor, borderRadius: fullScreen ? 0 : cornerRadius },
             ]}
             elevation={4}
           >
@@ -83,13 +111,19 @@ export default function DialogComponent({
                 <Text variant="titleMedium" style={styles.title}>
                   {title}
                 </Text>
-                {fullScreen && (
-                  <Pressable onPress={onDismiss} style={styles.closeBtn}>
-                    <MaterialCommunityIcons name="close" size={22} color={Colors.textMuted} />
-                  </Pressable>
-                )}
               </View>
-              <View style={[styles.body, fullScreen && styles.bodyFull]}>{children}</View>
+              {fullScreen ? (
+                <View style={[styles.body, styles.bodyFull]}>{children}</View>
+              ) : (
+                <ScrollView
+                  style={[styles.body, { maxHeight: bodyMaxHeight }]}
+                  contentContainerStyle={styles.bodyContent}
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}
+                >
+                  {children}
+                </ScrollView>
+              )}
               {actions.length > 0 && (
                 <View style={[styles.actions, fullScreen && styles.actionsFull]}>
                   {actions.map((action) =>
@@ -101,6 +135,7 @@ export default function DialogComponent({
                         colors={accentColors}
                         loading={action.loading}
                         disabled={action.disabled}
+                        compact
                       />
                     ) : (
                       <Button
@@ -108,6 +143,7 @@ export default function DialogComponent({
                         mode={action.mode ?? "text"}
                         onPress={action.onPress}
                         disabled={action.disabled}
+                        compact
                         style={styles.actionBtn}
                       >
                         {action.label}
@@ -177,11 +213,11 @@ const styles = StyleSheet.create({
     color: Colors.text,
     flex: 1,
   },
-  closeBtn: {
-    padding: Spacing.xs,
-  },
   body: {
     marginBottom: Spacing.md,
+  },
+  bodyContent: {
+    paddingBottom: Spacing.xs,
   },
   bodyFull: {
     flex: 1,

@@ -4,22 +4,26 @@ import { ScrollView, StyleSheet, View } from "react-native";
 import { Button, Card, Text, TextInput } from "react-native-paper";
 import { LinearGradient } from "expo-linear-gradient";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { Colors, Gradients, Radius, Spacing } from "@/constants/theme";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { Colors, Gradients, Radius, Spacing, TabBarMetrics } from "@/constants/theme";
 import DialogComponent from "@/components/dialog";
 import { DropdownField } from "@/components/dropdown-field";
 import { EmptyState } from "@/components/empty-state";
-import { GradientButton } from "@/components/gradient-button";
 import { GradientFab } from "@/components/gradient-fab";
 import { StatusDot } from "@/components/status-dot";
 import { ApiError, getVehiclesApi } from "@/lib/api";
 import { getDeviceId } from "@/lib/device";
 import { formatRelativeTime } from "@/lib/format";
-import { useRoleGuard } from "@/lib/use-role-guard";
+import { usePermission, usePermissionGuard } from "@/lib/use-permission-guard";
 import { findDeviceByHardwareId, findVehicleByNo, findVehicleByTag, getTrips } from "@/lib/storage";
 import type { DeviceRecord, TripMethod, TripRecord, Vehicle } from "@/types";
 
 export function TripScreen() {
-  const { allowed, loading: guardLoading } = useRoleGuard(["user", "superadmin"]);
+  const { allowed, loading: guardLoading } = usePermissionGuard("TripStart");
+  const { canAdd } = usePermission("TripStart");
+  const insets = useSafeAreaInsets();
+  const listBottomPadding = insets.bottom + TabBarMetrics.height + TabBarMetrics.bottomMargin + Spacing.md;
+  const fabBottom = insets.bottom + TabBarMetrics.height + TabBarMetrics.bottomMargin + 14;
 
   const [trips, setTrips] = useState<TripRecord[]>([]);
   const [registeredDevice, setRegisteredDevice] = useState<DeviceRecord | null>(null);
@@ -60,7 +64,6 @@ export function TripScreen() {
       .then(setApiVehicles)
       .catch((e) => {
         const message = e instanceof ApiError ? e.message : "Could not load vehicles.";
-        console.log("[vehicles]", message);
         setApiVehicles([]);
         setVehiclesError(message);
       })
@@ -183,7 +186,7 @@ export function TripScreen() {
         </LinearGradient>
       )}
 
-      <ScrollView contentContainerStyle={styles.list}>
+      <ScrollView contentContainerStyle={{ paddingBottom: listBottomPadding }}>
         {trips.length === 0 && (
           <EmptyState
             icon="login"
@@ -215,8 +218,8 @@ export function TripScreen() {
       </ScrollView>
 
       <GradientFab
-        disabled={!registeredDevice}
-        style={styles.fab}
+        disabled={!registeredDevice || !canAdd}
+        style={[styles.fab, { bottom: fabBottom }]}
         onPress={() => setModalVisible(true)}
       />
 
@@ -226,6 +229,10 @@ export function TripScreen() {
         title="Trip Start"
         icon="login"
         cornerRadius={24}
+        actions={[
+          { label: "Cancel", onPress: closeModal },
+          { label: "Submit", mode: "contained", onPress: handleSubmit },
+        ]}
       >
         <View style={styles.methodToggle}>
           <Button
@@ -278,11 +285,6 @@ export function TripScreen() {
         )}
 
         {!!error && <Text style={styles.error}>{error}</Text>}
-
-        <View style={styles.actionRow}>
-          <Button onPress={closeModal}>Cancel</Button>
-          <GradientButton label="Submit" onPress={handleSubmit} />
-        </View>
       </DialogComponent>
     </View>
   );
@@ -377,9 +379,6 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: "#F1F5F9",
   },
-  list: {
-    paddingBottom: 120,
-  },
   card: {
     marginBottom: Spacing.md,
     borderRadius: Radius.md,
@@ -418,7 +417,6 @@ const styles = StyleSheet.create({
   fab: {
     position: "absolute",
     right: 16,
-    bottom: 96,
   },
   methodToggle: {
     flexDirection: "row",
@@ -447,11 +445,5 @@ const styles = StyleSheet.create({
     color: Colors.danger,
     marginBottom: Spacing.md,
     fontSize: 13,
-  },
-  actionRow: {
-    flexDirection: "row",
-    justifyContent: "flex-end",
-    alignItems: "center",
-    gap: Spacing.sm,
   },
 });

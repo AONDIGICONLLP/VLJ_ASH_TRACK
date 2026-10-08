@@ -1,6 +1,6 @@
-import { useState } from "react";
-import { Pressable, ScrollView, StyleSheet, View } from "react-native";
-import { Text } from "react-native-paper";
+import { useEffect, useRef, useState } from "react";
+import { Pressable, ScrollView, StyleSheet, TextInput, View } from "react-native";
+import { ActivityIndicator, Text } from "react-native-paper";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { Colors, Radius, Spacing } from "@/constants/theme";
 
@@ -29,13 +29,59 @@ export function DropdownField({
   emptyMessage = "No options available",
 }: Props) {
   const [open, setOpen] = useState(false);
+  // The trigger flips open on the very same tap; rendering the (possibly
+  // long) option list is deferred a couple of frames so the tap itself
+  // never waits on that list layout — a brief "Loading options..." row
+  // fills the gap instead of the dropdown appearing to stall.
+  const [listReady, setListReady] = useState(false);
+  const [query, setQuery] = useState("");
+  const searchRef = useRef<TextInput>(null);
   const selected = options.find((o) => o.value === value);
+
+  const trimmedQuery = query.trim().toLowerCase();
+  const filtered = trimmedQuery
+    ? options.filter((o) => o.label.toLowerCase().includes(trimmedQuery))
+    : options;
+
+  useEffect(() => {
+    if (!open) return;
+    const timer = setTimeout(() => searchRef.current?.focus(), 60);
+    return () => clearTimeout(timer);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) {
+      setListReady(false);
+      return;
+    }
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => setListReady(true));
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
+  }, [open]);
+
+  function toggle() {
+    setOpen((prev) => {
+      if (prev) setQuery("");
+      return !prev;
+    });
+  }
+
+  function selectOption(optionValue: string) {
+    onSelect(optionValue);
+    setOpen(false);
+    setQuery("");
+  }
 
   return (
     <View style={styles.wrapper}>
       <Pressable
         disabled={disabled}
-        onPress={() => setOpen((p) => !p)}
+        onPress={toggle}
         style={[styles.trigger, open && styles.triggerOpen, disabled && styles.triggerDisabled]}
       >
         <View style={styles.triggerText}>
@@ -53,23 +99,55 @@ export function DropdownField({
 
       {open && (
         <View style={styles.list}>
-          {options.length === 0 ? (
+          {options.length > 0 && (
+            <View style={styles.searchRow}>
+              <MaterialCommunityIcons name="magnify" size={16} color={Colors.textMuted} />
+              <TextInput
+                ref={searchRef}
+                value={query}
+                onChangeText={setQuery}
+                placeholder="Type to filter..."
+                placeholderTextColor={Colors.textMuted}
+                style={styles.searchInput}
+                autoCorrect={false}
+              />
+              {!!query && (
+                <Pressable onPress={() => setQuery("")} hitSlop={8}>
+                  <MaterialCommunityIcons name="close-circle" size={16} color={Colors.textMuted} />
+                </Pressable>
+              )}
+            </View>
+          )}
+
+          {!listReady ? (
+            <View style={styles.emptyRow}>
+              <ActivityIndicator size="small" color={Colors.secondary} />
+              <Text style={styles.emptyText}>Loading options...</Text>
+            </View>
+          ) : options.length === 0 ? (
             <View style={styles.emptyRow}>
               <MaterialCommunityIcons name="inbox-outline" size={16} color={Colors.textMuted} />
               <Text style={styles.emptyText}>{emptyMessage}</Text>
             </View>
+          ) : filtered.length === 0 ? (
+            <View style={styles.emptyRow}>
+              <MaterialCommunityIcons name="text-search" size={16} color={Colors.textMuted} />
+              <Text style={styles.emptyText}>No matches for &quot;{query.trim()}&quot;</Text>
+            </View>
           ) : (
-            <ScrollView style={styles.scroll} nestedScrollEnabled bounces={false}>
-              {options.map((option) => {
+            <ScrollView
+              style={styles.scroll}
+              nestedScrollEnabled
+              bounces={false}
+              keyboardShouldPersistTaps="handled"
+            >
+              {filtered.map((option) => {
                 const isSelected = option.value === value;
                 return (
                   <Pressable
                     key={option.value}
                     style={[styles.option, isSelected && styles.optionSelected]}
-                    onPress={() => {
-                      onSelect(option.value);
-                      setOpen(false);
-                    }}
+                    onPress={() => selectOption(option.value)}
                   >
                     <Text
                       style={[styles.optionText, isSelected && styles.optionTextSelected]}
@@ -144,6 +222,23 @@ const styles = StyleSheet.create({
     borderBottomLeftRadius: Radius.sm,
     borderBottomRightRadius: Radius.sm,
     overflow: "hidden",
+  },
+  searchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "#F1F5F9",
+    backgroundColor: "#F8FAFC",
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: "600",
+    color: Colors.text,
+    padding: 0,
   },
   scroll: {
     maxHeight: 240,

@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { ScrollView, StyleSheet, View } from "react-native";
 import { Button, Text, TextInput } from "react-native-paper";
-import { Colors, Spacing } from "@/constants/theme";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { Colors, Spacing, TabBarMetrics } from "@/constants/theme";
 import DialogComponent from "@/components/dialog";
 import { DropdownField } from "@/components/dropdown-field";
 import { EmptyState } from "@/components/empty-state";
 import { GradientFab } from "@/components/gradient-fab";
 import { ResultDialog } from "@/components/result-dialog";
-import { useRoleGuard } from "@/lib/use-role-guard";
+import { usePermission, usePermissionGuard } from "@/lib/use-permission-guard";
 import { ApiError, getRolesApi, registerApi } from "@/lib/api";
 
 const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,20}$/;
@@ -15,7 +16,10 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_REGEX = /^[0-9]{10}$/;
 
 export default function UserCreationScreen() {
-  const { allowed, loading } = useRoleGuard(["admin", "superadmin"]);
+  const { allowed, loading } = usePermissionGuard("UserCreation");
+  const { canAdd } = usePermission("UserCreation");
+  const insets = useSafeAreaInsets();
+  const fabBottom = insets.bottom + TabBarMetrics.height + TabBarMetrics.bottomMargin + 14;
 
   const [modalVisible, setModalVisible] = useState(false);
   const [roles, setRoles] = useState<string[]>([]);
@@ -44,7 +48,6 @@ export default function UserCreationScreen() {
       .then(setRoles)
       .catch((e) => {
         const message = e instanceof ApiError ? e.message : "Could not load roles.";
-        console.log("[roles]", message);
         setRoles([]);
         setRolesError(message);
       })
@@ -126,7 +129,7 @@ export default function UserCreationScreen() {
         message="Tap + to register a new user account."
       />
 
-      <GradientFab style={styles.fab} onPress={openModal} />
+      <GradientFab style={[styles.fab, { bottom: fabBottom }]} onPress={openModal} disabled={!canAdd} />
 
       <DialogComponent
         visible={modalVisible}
@@ -134,12 +137,13 @@ export default function UserCreationScreen() {
         title="User Register"
         icon="account-plus-outline"
         cornerRadius={24}
+        fullScreen
         actions={[
           { label: "Cancel", onPress: closeModal, disabled: submitting },
           { label: "Register", mode: "contained", onPress: handleSubmit, loading: submitting },
         ]}
       >
-        <View>
+        <ScrollView keyboardShouldPersistTaps="handled" style={styles.formScroll}>
           <DropdownField
             label="Role ID *"
             value={roleID || null}
@@ -156,6 +160,7 @@ export default function UserCreationScreen() {
             onChangeText={setUsername}
             autoCapitalize="none"
             mode="outlined"
+            dense
             style={styles.input}
           />
           <TextInput
@@ -163,6 +168,7 @@ export default function UserCreationScreen() {
             value={name}
             onChangeText={setName}
             mode="outlined"
+            dense
             style={styles.input}
           />
           <TextInput
@@ -170,6 +176,7 @@ export default function UserCreationScreen() {
             value={company}
             onChangeText={setCompany}
             mode="outlined"
+            dense
             style={styles.input}
           />
           <TextInput
@@ -178,6 +185,7 @@ export default function UserCreationScreen() {
             onChangeText={setPassword}
             secureTextEntry={secure}
             mode="outlined"
+            dense
             style={styles.input}
             right={
               <TextInput.Icon
@@ -197,6 +205,7 @@ export default function UserCreationScreen() {
             autoCapitalize="none"
             keyboardType="email-address"
             mode="outlined"
+            dense
             style={styles.input}
           />
           {!!emailError && <Text style={styles.fieldError}>{emailError}</Text>}
@@ -207,6 +216,7 @@ export default function UserCreationScreen() {
             keyboardType="phone-pad"
             maxLength={10}
             mode="outlined"
+            dense
             style={styles.input}
           />
           {!!phoneError && <Text style={styles.fieldError}>{phoneError}</Text>}
@@ -216,6 +226,7 @@ export default function UserCreationScreen() {
             <Button
               mode={isActive ? "contained" : "outlined"}
               onPress={() => setIsActive(true)}
+              compact
               style={styles.statusBtn}
             >
               Active
@@ -223,12 +234,13 @@ export default function UserCreationScreen() {
             <Button
               mode={!isActive ? "contained" : "outlined"}
               onPress={() => setIsActive(false)}
+              compact
               style={styles.statusBtn}
             >
               Inactive
             </Button>
           </View>
-        </View>
+        </ScrollView>
       </DialogComponent>
 
       <ResultDialog
@@ -247,22 +259,24 @@ const styles = StyleSheet.create({
   fab: {
     position: "absolute",
     right: 16,
-    bottom: 96,
   },
   input: {
-    marginBottom: Spacing.md,
+    marginBottom: Spacing.sm,
+  },
+  formScroll: {
+    flex: 1,
   },
   helperText: {
     color: Colors.textMuted,
     fontSize: 12,
-    marginTop: -Spacing.sm,
-    marginBottom: Spacing.md,
+    marginTop: -Spacing.xs,
+    marginBottom: Spacing.sm,
   },
   fieldError: {
     color: Colors.danger,
     fontSize: 12,
-    marginTop: -Spacing.sm,
-    marginBottom: Spacing.md,
+    marginTop: -Spacing.xs,
+    marginBottom: Spacing.sm,
   },
   fieldLabel: {
     fontSize: 10,
@@ -275,7 +289,7 @@ const styles = StyleSheet.create({
   statusToggle: {
     flexDirection: "row",
     gap: Spacing.sm,
-    marginBottom: Spacing.md,
+    marginBottom: Spacing.sm,
   },
   statusBtn: {
     flex: 1,

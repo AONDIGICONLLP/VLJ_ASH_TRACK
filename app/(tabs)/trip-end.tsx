@@ -1,31 +1,54 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useFocusEffect } from "expo-router";
-import { Image, Pressable, ScrollView, StyleSheet, View } from "react-native";
-import { Button, Card, IconButton, Text, TextInput } from "react-native-paper";
-import { LinearGradient } from "expo-linear-gradient";
-import * as ImagePicker from "expo-image-picker";
-import { captureRef } from "react-native-view-shot";
-import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { Colors, Gradients, Radius, Spacing } from "@/constants/theme";
 import { AshSuccessDialog } from "@/components/ash-success-dialog";
 import DialogComponent from "@/components/dialog";
 import { DropdownField } from "@/components/dropdown-field";
 import { EmptyState } from "@/components/empty-state";
 import { GradientFab } from "@/components/gradient-fab";
 import { ResultDialog } from "@/components/result-dialog";
-import { StatusDot } from "@/components/status-dot";
-import { ApiError, getVehiclesApi, submitTripEndApi } from "@/lib/api";
+import { Colors, Gradients, Radius, Spacing, TabBarMetrics } from "@/constants/theme";
+import {
+  ApiError,
+  getImageRequiredApi,
+  getVehiclesApi,
+  getVehiclesByRfidApi,
+  getVehicleTagsApi,
+  submitTripEndApi,
+  type VehicleTag,
+} from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
 import { getDeviceId } from "@/lib/device";
 import {
   formatRelativeTime,
+  formatSqlDateTime,
   formatStampCoordinate,
   formatStampDate,
   formatStampTime,
 } from "@/lib/format";
-import { getCurrentCoordinates, LocationError, reverseGeocode } from "@/lib/location";
-import { useRoleGuard } from "@/lib/use-role-guard";
-import { findVehicleByNo, findVehicleByTag, getTrips } from "@/lib/storage";
-import type { TripMethod, TripRecord, Vehicle } from "@/types";
+import {
+  getCurrentCoordinates,
+  LowAccuracyError,
+  MockLocationError,
+  reverseGeocode,
+  type Coordinates,
+} from "@/lib/location";
+import { getTrips } from "@/lib/storage";
+import { usePermission, usePermissionGuard } from "@/lib/use-permission-guard";
+import type { TripRecord } from "@/types";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
+import * as ImagePicker from "expo-image-picker";
+import { useFocusEffect } from "expo-router";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Image, ScrollView, StyleSheet, View } from "react-native";
+import { ActivityIndicator, Button, Card, Chip, IconButton, Text, TextInput } from "react-native-paper";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { captureRef } from "react-native-view-shot";
+
+type RfidQueueItem = {
+  rfid: string;
+  status: "loading" | "resolved" | "error";
+  deviceID?: string;
+  imageRequired?: boolean;
+  error?: string;
+};
 
 function StampRow({ label, value }: { label: string; value: string }) {
   return (
@@ -38,23 +61,48 @@ function StampRow({ label, value }: { label: string; value: string }) {
 }
 
 export default function TripEndScreen() {
-  const { allowed, loading: guardLoading } = useRoleGuard(["user", "superadmin"]);
+  const { allowed, loading: guardLoading } = usePermissionGuard("TripEnd");
+  const { canAdd } = usePermission("TripEnd");
+  const { session } = useAuth();
+  // Only roleID 1 (the top-level admin account) can pick a vehicle from the
+  // dropdown and close out every tag mapped to it. Every other login only
+  // ever gets the RFID-entry flow — no vehicle dropdown, no method toggle.
+  const isFullAccess = String(session?.roleID) === "1";
+  const insets = useSafeAreaInsets();
+  const listBottomPadding = insets.bottom + TabBarMetrics.height + TabBarMetrics.bottomMargin + Spacing.md;
+  const fabBottom = insets.bottom + TabBarMetrics.height + TabBarMetrics.bottomMargin + 14;
 
   const [trips, setTrips] = useState<TripRecord[]>([]);
   const [readerId, setReaderId] = useState("");
 
   const [modalVisible, setModalVisible] = useState(false);
+  const [method, setMethod] = useState<"vehicle" | "rfid">("vehicle");
+
+  useEffect(() => {
+    if (!isFullAccess) setMethod("rfid");
+  }, [isFullAccess]);
+
   const [apiVehicles, setApiVehicles] = useState<string[]>([]);
   const [vehiclesLoading, setVehiclesLoading] = useState(false);
   const [vehiclesError, setVehiclesError] = useState("");
-  const [method, setMethod] = useState<TripMethod>("rfid");
-  const [rfidInput, setRfidInput] = useState("");
-  const [vehicleNoInput, setVehicleNoInput] = useState("");
-  const [matchedVehicle, setMatchedVehicle] = useState<Vehicle | null>(null);
-  const [matchedTag, setMatchedTag] = useState("");
-  const [lookupFailed, setLookupFailed] = useState(false);
+  const [vehicleNo, setVehicleNo] = useState("");
+  const [vehicleTags, setVehicleTags] = useState<VehicleTag[]>([]);
+  const [tagsLoading, setTagsLoading] = useState(false);
+  const [tagsError, setTagsError] = useState("");
+  const [selectedVehicleTag, setSelectedVehicleTag] = useState<string | null>(null);
+  // Defaults to not required until getImageFlag says otherwise for the
+  // selected tag.
+  const [vehicleImageRequired, setVehicleImageRequired] = useState(false);
 
-  const [coords, setCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [rfidInput, setRfidInput] = useState("");
+  const [rfidQueue, setRfidQueue] = useState<RfidQueueItem[]>([]);
+  // getImageFlag is checked against a separate mapping than the vehicle
+  // lookup — a tag with no vehicle mapped is dropped from rfidQueue, but if
+  // that tag's own image flag said "required", that must still count here;
+  // otherwise a required-photo answer silently vanishes along with the tag.
+  const [rfidAnyImageRequired, setRfidAnyImageRequired] = useState(false);
+
+  const [coords, setCoords] = useState<Coordinates | null>(null);
   const [locationLoading, setLocationLoading] = useState(false);
   const [locationError, setLocationError] = useState("");
   const [locationName, setLocationName] = useState("");
@@ -81,19 +129,59 @@ export default function TripEndScreen() {
     getDeviceId().then(setReaderId);
   }, []);
 
-  const refreshLocation = useCallback(() => {
-    setLocationLoading(true);
-    setLocationError("");
-    getCurrentCoordinates()
-      .then(async (c) => {
-        setCoords(c);
-        const geo = await reverseGeocode(c);
-        setLocationName(geo.locationName);
-        setAddress(geo.address);
-      })
-      .catch((e) => setLocationError(e instanceof LocationError ? e.message : "Could not get location."))
-      .finally(() => setLocationLoading(false));
+  useEffect(() => {
+    return () => clearPendingRfidLookup();
   }, []);
+
+  const getAccurateLocation = async () => {
+  const maxAttempts = 10;
+  const delay = 1000; // 1 second
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const c = await getCurrentCoordinates();
+
+    if (c && c.accuracy !<= 200) {
+      return c;
+    }
+
+    // Wait 1 second before trying again
+    await new Promise(resolve => setTimeout(resolve, delay));
+  }
+
+  throw new LowAccuracyError(
+    "Unable to get a location with accuracy within 200 meters."
+  );
+};
+
+const refreshLocation = useCallback(() => {
+  setLocationLoading(true);
+  setLocationError("");
+
+  getAccurateLocation()
+    .then(async (c) => {
+      setCoords(c);
+
+      const geo = await reverseGeocode(c);
+
+      setLocationName(geo.locationName);
+      setAddress(geo.address);
+    })
+    .catch((e) => {
+      setCoords(null);
+
+      if (
+        e instanceof MockLocationError ||
+        e instanceof LowAccuracyError
+      ) {
+        setLocationError(e.message);
+      }
+    })
+    .finally(() => {
+      setLocationLoading(false);
+    });
+}, []);
+
+  
 
   useFocusEffect(refreshLocation);
 
@@ -106,7 +194,6 @@ export default function TripEndScreen() {
       .then(setApiVehicles)
       .catch((e) => {
         const message = e instanceof ApiError ? e.message : "Could not load vehicles.";
-        console.log("[vehicles]", message);
         setApiVehicles([]);
         setVehiclesError(message);
       })
@@ -114,43 +201,194 @@ export default function TripEndScreen() {
   }, [modalVisible, refreshLocation]);
 
   useEffect(() => {
-    if (method !== "rfid" || !rfidInput.trim()) {
-      setMatchedVehicle(null);
-      setMatchedTag("");
-      setLookupFailed(false);
+    if (!vehicleNo) {
+      setVehicleTags([]);
+      setTagsError("");
+      setSelectedVehicleTag(null);
+      setVehicleImageRequired(false);
       return;
     }
     let cancelled = false;
-    findVehicleByTag(rfidInput.trim()).then((vehicle) => {
-      if (cancelled) return;
-      setMatchedVehicle(vehicle ?? null);
-      setMatchedTag(vehicle ? rfidInput.trim().toUpperCase() : "");
-      setLookupFailed(!vehicle);
-    });
+    setTagsLoading(true);
+    setTagsError("");
+    setSelectedVehicleTag(null);
+    setVehicleImageRequired(false);
+    getVehicleTagsApi(vehicleNo)
+      .then((tags) => {
+        if (cancelled) return;
+        setVehicleTags(tags);
+        const activeTags = tags.filter((t) => t.isActive);
+        // Only one possible choice — select it automatically.
+        if (activeTags.length === 1) selectVehicleTag(activeTags[0].rfid);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        const message = e instanceof ApiError ? e.message : "Could not load RFID tags.";
+        setTagsError(message);
+        setVehicleTags([]);
+      })
+      .finally(() => {
+        if (!cancelled) setTagsLoading(false);
+      });
     return () => {
       cancelled = true;
     };
-  }, [rfidInput, method]);
+  }, [vehicleNo]);
 
-  function switchMethod(next: TripMethod) {
-    setMethod(next);
-    setMatchedVehicle(null);
-    setMatchedTag("");
-    setLookupFailed(false);
-    setRfidInput("");
-    setVehicleNoInput("");
+  function handleVehicleSelect(value: string) {
+    setVehicleNo(value);
   }
 
-  async function handleVehicleNoChange(value: string) {
-    setVehicleNoInput(value);
-    if (!value.trim()) {
-      setMatchedVehicle(null);
-      setMatchedTag("");
+  function selectVehicleTag(rfid: string) {
+    setSelectedVehicleTag(rfid);
+    setVehicleImageRequired(false);
+    getImageRequiredApi(rfid)
+      .then((required) => {
+        console.log(`[trip-end] rfid=${rfid} imageRequired=${required}`);
+        setVehicleImageRequired(required);
+      })
+      .catch(() => {
+        console.log(`[trip-end] rfid=${rfid} imageRequired=false (check failed)`);
+        setVehicleImageRequired(false);
+      });
+  }
+
+  function switchMethod(next: "vehicle" | "rfid") {
+    setMethod(next);
+    setVehicleNo("");
+    setVehicleTags([]);
+    setTagsError("");
+    setSelectedVehicleTag(null);
+    setVehicleImageRequired(false);
+    setRfidInput("");
+    setRfidQueue([]);
+    setRfidAnyImageRequired(false);
+    clearPendingRfidLookup();
+  }
+
+  // Tags scanned within a short window are collected here and looked up
+  // together in one request instead of one request per tag — previously
+  // every tag fired its own getVehiclesByRfidApi call, so a burst of scans
+  // could fire a pile of simultaneous network requests and stall the
+  // handheld on a slow connection.
+  const pendingRfidLookupRef = useRef<string[]>([]);
+  const rfidLookupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function clearPendingRfidLookup() {
+    if (rfidLookupTimerRef.current) {
+      clearTimeout(rfidLookupTimerRef.current);
+      rfidLookupTimerRef.current = null;
+    }
+    pendingRfidLookupRef.current = [];
+  }
+
+  function flushRfidLookups() {
+    rfidLookupTimerRef.current = null;
+    const batch = Array.from(new Set(pendingRfidLookupRef.current));
+    pendingRfidLookupRef.current = [];
+    if (batch.length === 0) return;
+
+    // getImageFlag is checked against a separate zone mapping than
+    // getVehiclesByRfid's vehicle mapping — a tag can be found in one and
+    // not the other. So it's fired for every scanned tag immediately,
+    // independent of whether the vehicle lookup below finds a match, comes
+    // back empty, or fails outright.
+    const imageFlags = new Map<string, boolean>();
+    const imageFlagsSettled = Promise.all(
+      batch.map((tag) =>
+        getImageRequiredApi(tag)
+          .then((required) => imageFlags.set(tag, required))
+          .catch(() => imageFlags.set(tag, false))
+      )
+    );
+    imageFlagsSettled.then(() => {
+      if (batch.some((tag) => imageFlags.get(tag) === true)) {
+        setRfidAnyImageRequired(true);
+      }
+    });
+
+    getVehiclesByRfidApi(batch)
+      .then(async (vehicles) => {
+        await imageFlagsSettled;
+        const unmapped = batch.filter((tag) => !vehicles[tag]);
+        if (unmapped.length > 0) {
+          // No vehicle mapped to these tags — drop them from the queue
+          // instead of leaving a permanent "not found" row sitting there.
+          setRfidQueue((prev) => prev.filter((item) => !unmapped.includes(item.rfid)));
+        }
+        const mapped = batch.filter((tag) => vehicles[tag]);
+        if (mapped.length > 0) {
+          setRfidQueue((prev) =>
+            prev.map((item) =>
+              mapped.includes(item.rfid)
+                ? {
+                    ...item,
+                    status: "resolved",
+                    deviceID: vehicles[item.rfid],
+                    imageRequired: imageFlags.get(item.rfid) ?? false,
+                  }
+                : item
+            )
+          );
+        }
+      })
+      .catch((e) => {
+        const message = e instanceof ApiError ? e.message : "Could not look up these RFID tags.";
+        setRfidQueue((prev) =>
+          prev.map((item) => (batch.includes(item.rfid) ? { ...item, status: "error", error: message } : item))
+        );
+      });
+  }
+
+  // A handheld scanner fires an Enter after every tag it reads, but scanning
+  // several tags fast enough can batch multiple "TAG\n" segments into a
+  // single onChangeText call — each segment is a distinct tag, not one
+  // garbled string, so each gets its own queue entry.
+  function commitRfidTags(rawTags: string[]) {
+    const cleaned = Array.from(new Set(rawTags.map((t) => t.trim().toUpperCase()).filter(Boolean)));
+    if (cleaned.length === 0) return;
+
+    // A new tag changes what "image required" should mean for this batch —
+    // don't carry forward a stale required flag from a tag that's no longer
+    // part of the current set; let it be re-derived from scratch.
+    setRfidAnyImageRequired(false);
+    setError("");
+
+    setRfidQueue((prev) => {
+      const next = [...prev];
+      cleaned.forEach((rfid) => {
+        if (!next.some((item) => item.rfid === rfid)) {
+          next.unshift({ rfid, status: "loading" });
+        }
+      });
+      return next;
+    });
+
+    pendingRfidLookupRef.current.push(...cleaned);
+    if (rfidLookupTimerRef.current) clearTimeout(rfidLookupTimerRef.current);
+    rfidLookupTimerRef.current = setTimeout(flushRfidLookups, 200);
+  }
+
+  function handleRfidInputChange(text: string) {
+    if (text.includes("\n")) {
+      const segments = text.split("\n");
+      // The last segment has no trailing newline yet — it's still being
+      // typed/scanned, so keep it in the input instead of committing it.
+      const trailing = segments.pop() ?? "";
+      commitRfidTags(segments);
+      setRfidInput(trailing.toUpperCase());
       return;
     }
-    const vehicle = await findVehicleByNo(value.trim());
-    setMatchedVehicle(vehicle ?? null);
-    setMatchedTag(vehicle?.rfidTags.join(", ") ?? "");
+    setRfidInput(text.toUpperCase());
+  }
+
+  function removeQueuedRfid(tag: string) {
+    // Same reasoning as commitRfidTags — removing a tag changes the set
+    // that "image required" is derived from, so the stale flag is cleared
+    // and left to be re-derived from whatever tags remain.
+    setRfidAnyImageRequired(false);
+    setError("");
+    setRfidQueue((prev) => prev.filter((item) => item.rfid !== tag));
   }
 
   async function pickImage() {
@@ -189,50 +427,147 @@ export default function TripEndScreen() {
 
   function closeModal() {
     setModalVisible(false);
-    setMethod("rfid");
+    setMethod(isFullAccess ? "vehicle" : "rfid");
+    setVehicleNo("");
+    setVehicleTags([]);
+    setTagsError("");
+    setSelectedVehicleTag(null);
+    setVehicleImageRequired(false);
     setRfidInput("");
-    setVehicleNoInput("");
-    setMatchedVehicle(null);
-    setMatchedTag("");
-    setLookupFailed(false);
+    setRfidQueue([]);
+    setRfidAnyImageRequired(false);
+    clearPendingRfidLookup();
     setNote("");
     setRawImageUri(null);
     setStamping(false);
     setImageUri(null);
     setError("");
+    setLocationError("");
   }
 
+  // Defaults to not required unless getImageFlag has explicitly confirmed it
+  // for a resolved tag. rfidAnyImageRequired also covers tags that came back
+  // "required" from getImageFlag but were then dropped from rfidQueue for
+  // having no mapped vehicle — that answer must still count here.
+  const imageRequired =
+    method === "rfid"
+      ? rfidAnyImageRequired || rfidQueue.some((item) => item.imageRequired === true)
+      : vehicleImageRequired;
+
   async function handleSubmit() {
-    if (!matchedVehicle) {
-      setError(
-        method === "rfid"
-          ? "Enter a valid RFID tag that is mapped to a vehicle."
-          : "Enter a valid vehicle number that is mapped."
-      );
-      return;
-    }
     if (!coords) {
-      setError("Current location is not available yet.");
+      setError(locationError || "Current location is not available yet.");
       return;
     }
     if (!readerId) {
       setError("This handheld device's ID is not available yet.");
       return;
     }
+    if (imageRequired && !imageUri) {
+      setError("Attach a vehicle photo before submitting.");
+      return;
+    }
+
+    if (method === "rfid") {
+      if (rfidQueue.length === 0) {
+        setError("Enter at least one RFID tag.");
+        return;
+      }
+      if (rfidQueue.some((item) => item.status === "loading")) {
+        setError("Wait for the RFID lookups to finish.");
+        return;
+      }
+      const resolved = rfidQueue.filter(
+        (item): item is RfidQueueItem & { deviceID: string } => item.status === "resolved" && !!item.deviceID
+      );
+      if (resolved.length === 0) {
+        setError(
+          rfidQueue.length === 1
+            ? "Vehicle not available for this RFID tag."
+            : "Vehicle not available for any of the entered RFID tags."
+        );
+        return;
+      }
+
+      setSubmitting(true);
+      setError("");
+
+      const succeeded: { rfid: string; message: string }[] = [];
+      const failures: RfidQueueItem[] = [];
+
+      for (const item of resolved) {
+        try {
+          const payload = {
+            readerID: readerId,
+            endTimestamp: formatSqlDateTime(new Date()),
+            latitude: String(coords.latitude),
+            longitude: String(coords.longitude),
+            deviceID: item.deviceID,
+            rfid: item.rfid,
+            imageUri: imageUri ?? undefined,
+          };
+          const message = await submitTripEndApi(payload);
+          succeeded.push({ rfid: item.rfid, message });
+        } catch (e) {
+          failures.push({
+            ...item,
+            status: "error",
+            error: e instanceof ApiError ? e.message : "Request failed.",
+          });
+        }
+      }
+
+      setSubmitting(false);
+
+      if (failures.length > 0) {
+        setRfidQueue(failures);
+        loadTrips();
+        const parts: string[] = [];
+        if (succeeded.length > 0) parts.push(`Closed: ${succeeded.map((s) => s.rfid).join(", ")}.`);
+        parts.push(`Failed: ${failures.map((f) => `${f.rfid} (${f.error})`).join(", ")}`);
+        setErrorResult(parts.join(" "));
+        return;
+      }
+
+      closeModal();
+      loadTrips();
+      // Show the server's own message(s) rather than a locally-made-up one
+      // — if every tag got back the same text, show it once; otherwise list
+      // each tag's own message so nothing the API said gets dropped.
+      const uniqueMessages = Array.from(new Set(succeeded.map((s) => s.message).filter(Boolean)));
+      setSuccessResult(
+        uniqueMessages.length === 1
+          ? uniqueMessages[0]
+          : uniqueMessages.length === 0
+            ? `Trip ended for ${succeeded.length} tag${succeeded.length === 1 ? "" : "s"}.`
+            : succeeded.map((s) => `${s.rfid}: ${s.message}`).join("\n")
+      );
+      return;
+    }
+
+    if (!vehicleNo) {
+      setError("Select a vehicle.");
+      return;
+    }
+    if (!selectedVehicleTag) {
+      setError("Select an RFID tag for this vehicle.");
+      return;
+    }
 
     setSubmitting(true);
     setError("");
     try {
-      const message = await submitTripEndApi({
-        deviceID: matchedVehicle.vehicleNo,
-        rfid: matchedTag,
+      const payload = {
         readerID: readerId,
-        latitude: coords.latitude,
-        longitude: coords.longitude,
-        endTimestamp: Math.floor(Date.now() / 1000),
+        endTimestamp: formatSqlDateTime(new Date()),
+        latitude: String(coords.latitude),
+        longitude: String(coords.longitude),
+        deviceID: vehicleNo,
+        rfid: selectedVehicleTag,
         imageUri: imageUri ?? undefined,
-      });
-
+      };
+      console.log("[trip-end] submitting:", payload);
+      const message = await submitTripEndApi(payload);
       closeModal();
       loadTrips();
       setSuccessResult(message);
@@ -247,33 +582,7 @@ export default function TripEndScreen() {
 
   return (
     <View style={styles.safe}>
-      <LinearGradient
-        colors={Gradients.secondaryButton}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.readerCard}
-      >
-        <View style={styles.liveRow}>
-          <StatusDot color={Colors.white} size={8} />
-          <Text style={styles.liveText}>READER READY</Text>
-        </View>
-        <View style={styles.deviceMetaRow}>
-          <MaterialCommunityIcons name="cellphone-nfc" size={16} color="rgba(255,255,255,0.9)" />
-          <Text style={styles.deviceMetaText}>{readerId || "Detecting..."}</Text>
-        </View>
-        <Pressable style={styles.deviceMetaRow} onPress={refreshLocation} disabled={locationLoading}>
-          <MaterialCommunityIcons name="crosshairs-gps" size={16} color="rgba(255,255,255,0.9)" />
-          <Text style={styles.deviceMetaText}>
-            {locationLoading
-              ? "Getting current location..."
-              : coords
-                ? `${coords.latitude.toFixed(5)}, ${coords.longitude.toFixed(5)}`
-                : locationError || "Location unavailable · tap to retry"}
-          </Text>
-        </Pressable>
-      </LinearGradient>
-
-      <ScrollView contentContainerStyle={styles.list}>
+      <ScrollView contentContainerStyle={{ paddingBottom: listBottomPadding }}>
         {trips.length === 0 && (
           <EmptyState icon="flag-checkered" message="No trip end records yet. Tap + to close out a trip." />
         )}
@@ -303,7 +612,7 @@ export default function TripEndScreen() {
         ))}
       </ScrollView>
 
-      <GradientFab style={styles.fab} onPress={() => setModalVisible(true)} />
+      <GradientFab style={[styles.fab, { bottom: fabBottom }]} onPress={() => setModalVisible(true)} disabled={!canAdd} />
 
       <DialogComponent
         visible={modalVisible}
@@ -325,93 +634,204 @@ export default function TripEndScreen() {
         ]}
       >
         <ScrollView keyboardShouldPersistTaps="handled" style={styles.formScroll}>
-          <Text style={styles.formSubtitle}>
-            Identify the vehicle and capture its current location to close out this trip.
-          </Text>
-
-          <Text style={styles.sectionLabel}>Vehicle</Text>
-          <View style={styles.methodToggle}>
-            <Button
-              mode={method === "rfid" ? "contained" : "outlined"}
-              onPress={() => switchMethod("rfid")}
-              style={styles.methodBtn}
-            >
-              Via RFID
-            </Button>
-            <Button
-              mode={method === "vehicle" ? "contained" : "outlined"}
-              onPress={() => switchMethod("vehicle")}
-              style={styles.methodBtn}
-            >
-              Via Vehicle No
-            </Button>
-          </View>
-
-          {method === "rfid" ? (
-            <TextInput
-              label="RFID Tag *"
-              value={rfidInput}
-              onChangeText={(v) => setRfidInput(v.toUpperCase())}
-              autoCapitalize="characters"
-              mode="outlined"
-              style={styles.input}
-            />
-          ) : (
-            <DropdownField
-              label="Vehicle No *"
-              value={vehicleNoInput || null}
-              options={apiVehicles.map((v) => ({ label: v, value: v }))}
-              onSelect={handleVehicleNoChange}
-              disabled={vehiclesLoading}
-              emptyMessage={
-                vehiclesLoading ? "Loading vehicles..." : vehiclesError || "No vehicles found."
-              }
-            />
-          )}
-
-          {method === "rfid" && lookupFailed && (
-            <Text style={styles.warningInline}>No vehicle mapped to this RFID tag.</Text>
-          )}
-
-          {matchedVehicle && (
-            <View style={styles.autofillBox}>
-              <Text style={styles.detail}>Vehicle No: {matchedVehicle.vehicleNo}</Text>
-              <Text style={styles.detail}>RFID Tag(s): {matchedTag}</Text>
+          <View style={[styles.locationBox, !!locationError && styles.locationBoxError]}>
+            <View style={styles.locationBoxRow}>
+              <MaterialCommunityIcons
+                name={locationError ? "shield-alert-outline" : "crosshairs-gps"}
+                size={16}
+                color={locationError ? Colors.danger : Colors.secondary}
+              />
+              <Text
+                style={[styles.locationBoxText, !!locationError && styles.tagChipErrorText]}
+                numberOfLines={2}
+              >
+                {locationLoading
+                  ? "Getting current location..."
+                  : locationError
+                    ? locationError
+                    : coords
+                      ? `${coords.latitude.toFixed(6)}, ${coords.longitude.toFixed(6)}`
+                      : "Location unavailable"}
+              </Text>
+              {locationLoading ? (
+                <ActivityIndicator size="small" color={Colors.secondary} style={styles.locationRefreshBtn} />
+              ) : (
+                <IconButton
+                  icon="refresh"
+                  size={16}
+                  onPress={refreshLocation}
+                  style={styles.locationRefreshBtn}
+                />
+              )}
             </View>
-          )}
-
-          <Text style={styles.sectionLabel}>Reader & Location</Text>
-          <View style={styles.locationBox}>
-            <View style={styles.locationHeader}>
-              <MaterialCommunityIcons name="cellphone-nfc" size={16} color={Colors.secondary} />
-              <Text style={styles.locationLabel}>Reader ID</Text>
-            </View>
-            <Text style={styles.locationValue}>{readerId || "Detecting..."}</Text>
-
-            <View style={styles.locationDivider} />
-
-            <View style={styles.locationHeader}>
-              <MaterialCommunityIcons name="crosshairs-gps" size={16} color={Colors.secondary} />
-              <Text style={styles.locationLabel}>Current Location</Text>
-              <IconButton icon="refresh" size={18} onPress={refreshLocation} disabled={locationLoading} />
-            </View>
-            {locationLoading ? (
-              <Text style={styles.detail}>Getting location...</Text>
-            ) : coords ? (
-              <>
-                <Text style={styles.locationValue}>
-                  {coords.latitude.toFixed(6)}, {coords.longitude.toFixed(6)}
-                </Text>
-                {!!(locationName || address) && (
-                  <Text style={styles.detail}>
-                    {[locationName, address].filter(Boolean).join(" · ")}
-                  </Text>
-                )}
-              </>
-            ) : (
-              <Text style={styles.warningInline}>{locationError || "Location not available."}</Text>
+            {!!coords && coords.accuracy != null && (
+              <Text style={styles.locationAccuracy}>
+                Accuracy: ±{Math.round(coords.accuracy)} m
+                {coords.accuracy > 20 ? " — move to open sky for a better fix" : ""}
+              </Text>
             )}
           </View>
+
+          <Text style={styles.sectionLabel}>{method === "vehicle" ? "Vehicle" : "RFID Tag"}</Text>
+          {isFullAccess && (
+            <View style={styles.methodToggle}>
+              <Button
+                mode={method === "vehicle" ? "contained" : "outlined"}
+                onPress={() => switchMethod("vehicle")}
+                compact
+                style={styles.methodBtn}
+              >
+                Via Vehicle No
+              </Button>
+              <Button
+                mode={method === "rfid" ? "contained" : "outlined"}
+                onPress={() => switchMethod("rfid")}
+                compact
+                style={styles.methodBtn}
+              >
+                Via RFID
+              </Button>
+            </View>
+          )}
+
+          {method === "vehicle" ? (
+            <>
+              {vehiclesLoading && (
+                <View style={styles.lookupBanner}>
+                  <ActivityIndicator size="small" color={Colors.secondary} />
+                  <Text style={styles.lookupBannerText}>Loading vehicles...</Text>
+                </View>
+              )}
+              <DropdownField
+                label="Vehicle No *"
+                value={vehicleNo || null}
+                options={apiVehicles.map((v) => ({ label: v, value: v }))}
+                onSelect={handleVehicleSelect}
+                disabled={vehiclesLoading}
+                emptyMessage={
+                  vehiclesLoading ? "Loading vehicles..." : vehiclesError || "No vehicles found."
+                }
+              />
+
+              {!!vehicleNo && (
+                <>
+                  <Text style={styles.fieldLabel}>RFID Tag * (select one to close)</Text>
+                  {tagsLoading ? (
+                    <Text style={styles.detail}>Loading RFID tags...</Text>
+                  ) : tagsError ? (
+                    <Text style={styles.warningInline}>{tagsError}</Text>
+                  ) : vehicleTags.length === 0 ? (
+                    <Text style={styles.warningInline}>No RFID tags mapped to this vehicle.</Text>
+                  ) : vehicleTags.every((t) => !t.isActive) ? (
+                    <Text style={styles.warningInline}>No active RFID tags found for this vehicle.</Text>
+                  ) : (
+                    <View style={styles.chipContainer}>
+                      {vehicleTags.map((tag) => (
+                        <Chip
+                          key={tag.rfid}
+                          selected={selectedVehicleTag === tag.rfid}
+                          disabled={!tag.isActive}
+                          onPress={() => selectVehicleTag(tag.rfid)}
+                          style={[
+                            styles.tagChip,
+                            !tag.isActive && styles.tagChipInactive,
+                          ]}
+                        >
+                          {tag.rfid}
+                          {!tag.isActive ? " · inactive" : ""}
+                        </Chip>
+                      ))}
+                    </View>
+                  )}
+                  {!!selectedVehicleTag && (
+                    <View style={styles.lookupBanner}>
+                      <MaterialCommunityIcons
+                        name={vehicleImageRequired ? "camera-outline" : "camera-off-outline"}
+                        size={16}
+                        color={Colors.secondary}
+                      />
+                      <Text style={styles.lookupBannerText}>
+                        {selectedVehicleTag}: Image {vehicleImageRequired ? "Required" : "Optional"}
+                      </Text>
+                    </View>
+                  )}
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              <TextInput
+                label="Enter RFID tag & press Enter"
+                value={rfidInput}
+                onChangeText={handleRfidInputChange}
+                onSubmitEditing={() => {
+                  commitRfidTags([rfidInput]);
+                  setRfidInput("");
+                }}
+                autoCapitalize="characters"
+                mode="outlined"
+                style={styles.input}
+              />
+              {rfidQueue.some((item) => item.status === "loading") && (
+                <View style={styles.lookupBanner}>
+                  <ActivityIndicator size="small" color={Colors.secondary} />
+                  <Text style={styles.lookupBannerText}>Looking up RFID tag(s)...</Text>
+                </View>
+              )}
+              {rfidQueue.length > 0 && (
+                <ScrollView
+                  style={styles.rfidStatusList}
+                  nestedScrollEnabled
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}
+                >
+                  {rfidQueue.map((item) => (
+                    <View key={item.rfid} style={styles.rfidStatusRow}>
+                      <MaterialCommunityIcons
+                        name={
+                          item.status === "resolved"
+                            ? "check-circle-outline"
+                            : item.status === "error"
+                              ? "alert-circle-outline"
+                              : "clock-outline"
+                        }
+                        size={16}
+                        color={
+                          item.status === "resolved"
+                            ? Colors.secondary
+                            : item.status === "error"
+                              ? Colors.danger
+                              : Colors.textMuted
+                        }
+                      />
+                      <Text style={styles.rfidStatusTag} numberOfLines={1}>
+                        {item.rfid}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.rfidStatusValue,
+                          item.status === "error" && styles.tagChipErrorText,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {item.status === "loading"
+                          ? "Looking up..."
+                          : item.status === "resolved"
+                            ? `Vehicle: ${item.deviceID} · Image ${item.imageRequired ? "Required" : "Optional"}`
+                            : item.error || "Not found"}
+                      </Text>
+                      <IconButton
+                        icon="close"
+                        size={16}
+                        onPress={() => removeQueuedRfid(item.rfid)}
+                        style={styles.rfidStatusRemove}
+                      />
+                    </View>
+                  ))}
+                </ScrollView>
+              )}
+            </>
+          )}
 
           <Text style={styles.fieldLabel}>Note (optional)</Text>
           <TextInput
@@ -422,9 +842,8 @@ export default function TripEndScreen() {
             style={styles.input}
           />
 
-          <Text style={styles.fieldLabel}>Trip End Vehicle Image (optional)</Text>
-          <Text style={styles.imageHint}>
-            Location, address, date/time and your note are stamped onto the photo.
+          <Text style={styles.fieldLabel}>
+            Trip End Vehicle Image {imageRequired ? "*" : "(optional)"}
           </Text>
           {stamping ? (
             <View style={styles.stampingBox}>
@@ -444,7 +863,7 @@ export default function TripEndScreen() {
             </View>
           ) : (
             <View style={styles.imageButtonRow}>
-              <Button mode="outlined" icon="camera-outline" onPress={pickImage} style={styles.imageBtn}>
+              <Button mode="outlined" icon="camera-outline" onPress={pickImage} compact style={styles.imageBtn}>
                 Camera
               </Button>
             </View>
@@ -513,42 +932,6 @@ export default function TripEndScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background, padding: Spacing.md },
-  readerCard: {
-    borderRadius: Radius.md,
-    padding: Spacing.md,
-    marginBottom: Spacing.md,
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.2,
-    shadowRadius: 6,
-  },
-  liveRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: Spacing.xs,
-    marginBottom: Spacing.xs,
-  },
-  liveText: {
-    fontSize: 10,
-    fontWeight: "800",
-    color: Colors.white,
-    letterSpacing: 1.2,
-  },
-  deviceMetaRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    marginTop: 4,
-  },
-  deviceMetaText: {
-    fontSize: 13,
-    color: "rgba(255,255,255,0.9)",
-    fontWeight: "600",
-  },
-  list: {
-    paddingBottom: 120,
-  },
   card: {
     marginBottom: Spacing.md,
     borderRadius: Radius.md,
@@ -615,16 +998,9 @@ const styles = StyleSheet.create({
   fab: {
     position: "absolute",
     right: 16,
-    bottom: 96,
   },
   formScroll: {
     flex: 1,
-  },
-  formSubtitle: {
-    fontSize: 13,
-    color: Colors.textMuted,
-    lineHeight: 19,
-    marginBottom: Spacing.lg,
   },
   sectionLabel: {
     fontSize: 11,
@@ -649,12 +1025,21 @@ const styles = StyleSheet.create({
     color: Colors.danger,
     fontSize: 12,
     marginTop: Spacing.xs,
+    marginBottom: Spacing.md,
   },
-  autofillBox: {
-    backgroundColor: "#EEF3F2",
+  lookupBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: Spacing.sm,
+    backgroundColor: "#EAF2FA",
     borderRadius: Radius.sm,
     padding: Spacing.sm,
-    marginBottom: Spacing.md,
+    marginBottom: Spacing.sm,
+  },
+  lookupBannerText: {
+    fontSize: 12,
+    color: Colors.secondary,
+    fontWeight: "600",
   },
   locationBox: {
     backgroundColor: "#EAF2FA",
@@ -662,29 +1047,79 @@ const styles = StyleSheet.create({
     padding: Spacing.sm,
     marginBottom: Spacing.md,
   },
-  locationHeader: {
+  locationBoxError: {
+    backgroundColor: "#FBE9E3",
+  },
+  locationBoxRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: Spacing.xs,
+    gap: Spacing.sm,
   },
-  locationDivider: {
-    height: 1,
-    backgroundColor: "rgba(0,82,152,0.12)",
-    marginVertical: Spacing.sm,
-  },
-  locationLabel: {
+  locationBoxText: {
     flex: 1,
-    fontSize: 12,
-    fontWeight: "700",
-    color: Colors.secondary,
-    textTransform: "uppercase",
-    letterSpacing: 0.6,
-  },
-  locationValue: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: "700",
     color: Colors.text,
+  },
+  locationRefreshBtn: {
+    margin: 0,
+    width: 28,
+    height: 28,
+  },
+  locationAccuracy: {
+    fontSize: 11,
+    color: Colors.textMuted,
     marginTop: 2,
+    marginLeft: 24,
+  },
+  chipContainer: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: Spacing.xs,
+    marginBottom: Spacing.md,
+  },
+  tagChip: {
+    backgroundColor: "#E3F2D3",
+  },
+  tagChipInactive: {
+    backgroundColor: "#F1F5F9",
+    opacity: 0.6,
+  },
+  tagChipErrorText: {
+    color: Colors.danger,
+  },
+  rfidStatusList: {
+    maxHeight: 220,
+    backgroundColor: "#F8FAFC",
+    borderRadius: Radius.sm,
+    paddingHorizontal: Spacing.sm,
+    marginBottom: Spacing.md,
+  },
+  rfidStatusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: Spacing.sm,
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: "#EEF2F6",
+  },
+  rfidStatusTag: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: "700",
+    color: Colors.text,
+  },
+  rfidStatusValue: {
+    flexShrink: 0,
+    fontSize: 12,
+    color: Colors.textMuted,
+    fontWeight: "600",
+    textAlign: "right",
+  },
+  rfidStatusRemove: {
+    margin: 0,
+    width: 28,
+    height: 28,
   },
   fieldLabel: {
     fontSize: 10,
@@ -693,11 +1128,6 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     textTransform: "uppercase",
     marginBottom: Spacing.xs,
-  },
-  imageHint: {
-    fontSize: 12,
-    color: Colors.textMuted,
-    marginBottom: Spacing.sm,
   },
   imageButtonRow: {
     flexDirection: "row",

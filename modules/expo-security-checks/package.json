@@ -1,0 +1,9 @@
+{
+  "name": "expo-security-checks",
+  "version": "1.0.0",
+  "description": "Local module: Android Developer Options detection for ASH TRACK's location-security requirements.",
+  "main": "index.ts",
+  "types": "index.ts",
+  "license": "UNLICENSED",
+  "private": true
+}

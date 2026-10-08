@@ -2,6 +2,9 @@
   "name": "vlj_ash_track",
   "main": "expo-router/entry",
   "version": "1.0.0",
+  "workspaces": [
+    "modules/*"
+  ],
   "scripts": {
     "start": "expo start",
     "reset-project": "node ./scripts/reset-project.js",
@@ -29,6 +32,7 @@
     "expo-location": "~19.0.8",
     "expo-network": "~8.0.8",
     "expo-router": "~6.0.23",
+    "expo-security-checks": "*",
     "expo-splash-screen": "~31.0.13",
     "expo-status-bar": "~3.0.9",
     "expo-symbols": "~1.0.8",

@@ -28,8 +28,6 @@ export type Session = {
   roleID: number;
   permissions: Permission[];
   token: string;
-  // TEMPORARY: the real roleID -> app role mapping isn't defined yet, so
-  // every successful login is treated as full-access Superadmin for now.
   role: Role;
 };
 

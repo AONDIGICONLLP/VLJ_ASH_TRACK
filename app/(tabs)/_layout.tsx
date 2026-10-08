@@ -1,21 +1,24 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { router, Tabs } from "expo-router";
-import { Alert, StyleSheet, View } from "react-native";
+import type { BottomTabBarButtonProps } from "@react-navigation/bottom-tabs";
+import { Alert, Animated, Pressable, StyleSheet, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ActivityIndicator, Appbar } from "react-native-paper";
 import { LinearGradient } from "expo-linear-gradient";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
+import * as Haptics from "expo-haptics";
 import { Colors, Gradients, Radius } from "@/constants/theme";
 import { useAuth } from "@/lib/auth-context";
-import type { Role } from "@/types";
+import { hasAnyView, hasView } from "@/lib/permissions";
+import type { Session } from "@/types";
 
 const TITLES: Record<string, string> = {
   "vehicle-rfid": "Vehicle RFID Mapping",
   "device-creation": "Device Registration",
   "trip-start": "Trip Start",
   "trip-end": "Trip End",
-  "user-creation": "User Register",
   history: "History",
-  more: "More",
+  "user-creation": "User Register",
 };
 
 const ROUTE_ICONS: Record<string, keyof typeof MaterialCommunityIcons.glyphMap> = {
@@ -23,22 +26,27 @@ const ROUTE_ICONS: Record<string, keyof typeof MaterialCommunityIcons.glyphMap> 
   "device-creation": "cellphone-cog",
   "trip-start": "flag-outline",
   "trip-end": "flag-checkered",
-  "user-creation": "account-plus-outline",
   history: "history",
-  more: "dots-horizontal-circle-outline",
+  "user-creation": "account-plus-outline",
 };
 
-const VISIBLE_IN_BAR: Record<Role, string[]> = {
-  superadmin: ["vehicle-rfid", "device-creation", "trip-end", "history", "more"],
-  admin: ["vehicle-rfid", "user-creation", "device-creation", "history", "more"],
-  user: ["vehicle-rfid", "device-creation", "trip-end"],
+// Maps each bottom-tab route to the permission shortCode that gates it.
+// History isn't tied to a single resource permission — it's visible as long
+// as the account can view anything at all.
+const ROUTE_PERMISSION: Record<string, string | null> = {
+  "vehicle-rfid": "RFIDVehicleMapping",
+  "device-creation": "HandheldReaderRegistration",
+  "trip-start": "TripStart",
+  "trip-end": "TripEnd",
+  history: null,
+  "user-creation": "UserCreation",
 };
 
-const BACK_TO_MORE_ROUTES = ["user-creation"];
-
-function tabHref(role: Role | undefined, name: string) {
-  if (!role) return null;
-  return VISIBLE_IN_BAR[role].includes(name) ? undefined : null;
+function tabHref(session: Session | null, name: string) {
+  if (!session) return null;
+  const shortCode = ROUTE_PERMISSION[name];
+  const visible = shortCode === null ? hasAnyView(session.permissions) : hasView(session.permissions, shortCode);
+  return visible ? undefined : null;
 }
 
 function renderTabIcon(iconName: keyof typeof MaterialCommunityIcons.glyphMap) {
@@ -64,8 +72,51 @@ function renderTabIcon(iconName: keyof typeof MaterialCommunityIcons.glyphMap) {
   return TabIcon;
 }
 
+// Adds a tactile press-in bounce + a light haptic tick on tab change, on top
+// of the default tab button — purely a feel/polish layer.
+function AnimatedTabButton({
+  children,
+  style,
+  onPress,
+  onLongPress,
+  accessibilityState,
+}: BottomTabBarButtonProps) {
+  const scale = useRef(new Animated.Value(1)).current;
+
+  function pressIn() {
+    Animated.spring(scale, { toValue: 0.88, useNativeDriver: true, speed: 30, bounciness: 6 }).start();
+  }
+
+  function pressOut() {
+    Animated.spring(scale, { toValue: 1, useNativeDriver: true, speed: 20, bounciness: 8 }).start();
+  }
+
+  function handlePress(event: Parameters<NonNullable<BottomTabBarButtonProps["onPress"]>>[0]) {
+    if (!accessibilityState?.selected) {
+      Haptics.selectionAsync();
+    }
+    onPress?.(event);
+  }
+
+  return (
+    <Pressable
+      onPress={handlePress}
+      onLongPress={onLongPress}
+      onPressIn={pressIn}
+      onPressOut={pressOut}
+      accessibilityState={accessibilityState}
+      style={style}
+    >
+      <Animated.View style={[styles.tabButtonInner, { transform: [{ scale }] }]}>
+        {children}
+      </Animated.View>
+    </Pressable>
+  );
+}
+
 export default function TabsLayout() {
   const { session, loading, logout } = useAuth();
+  const insets = useSafeAreaInsets();
 
   useEffect(() => {
     if (!loading && !session) {
@@ -91,53 +142,57 @@ export default function TabsLayout() {
     return <ActivityIndicator style={styles.loader} color={Colors.primary} size="large" />;
   }
 
-  const role = session.role;
-
   return (
     <Tabs
       screenOptions={({ route }) => ({
         header: () => {
-          const showBackToMore =
-            role === "superadmin" && BACK_TO_MORE_ROUTES.includes(route.name);
           return (
             <View style={styles.headerWrap}>
               <LinearGradient
-                colors={Gradients.header}
+                colors={Gradients.hero}
                 start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-                style={StyleSheet.absoluteFillObject}
+                end={{ x: 1, y: 1 }}
+                style={styles.headerGradient}
               />
+              <View style={styles.headerGlow} pointerEvents="none" />
               <Appbar.Header style={styles.appbar}>
-                {showBackToMore ? (
-                  <Appbar.BackAction
+                <View style={styles.headerIconBadge}>
+                  <MaterialCommunityIcons
+                    name={ROUTE_ICONS[route.name] ?? "view-grid-outline"}
+                    size={18}
                     color={Colors.white}
-                    onPress={() => router.replace("/(tabs)/more")}
                   />
-                ) : (
-                  <View style={styles.headerIconBadge}>
-                    <MaterialCommunityIcons
-                      name={ROUTE_ICONS[route.name] ?? "view-grid-outline"}
-                      size={19}
-                      color={Colors.white}
-                    />
-                  </View>
-                )}
+                </View>
                 <Appbar.Content
                   title={TITLES[route.name] ?? route.name}
                   titleStyle={styles.appbarTitle}
                   style={styles.appbarContent}
                   color={Colors.white}
                 />
-                <Appbar.Action icon="logout" color={Colors.white} onPress={handleLogout} />
+                <Appbar.Action
+                  icon="logout"
+                  color={Colors.white}
+                  style={styles.headerBadge}
+                  onPress={handleLogout}
+                />
               </Appbar.Header>
             </View>
           );
         },
         tabBarActiveTintColor: Colors.primary,
         tabBarInactiveTintColor: Colors.textMuted,
-        tabBarStyle: styles.tabBar,
+        tabBarStyle: [styles.tabBar, { bottom: 14 + insets.bottom }],
+        tabBarBackground: () => (
+          <LinearGradient
+            colors={["#FFFFFF", "#F3F8FF"]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 0, y: 1 }}
+            style={styles.tabBarGradient}
+          />
+        ),
         tabBarLabelStyle: styles.tabBarLabel,
         tabBarItemStyle: styles.tabBarItem,
+        tabBarButton: AnimatedTabButton,
       })}
     >
       <Tabs.Screen
@@ -145,17 +200,8 @@ export default function TabsLayout() {
         options={{
           title: TITLES["vehicle-rfid"],
           tabBarLabel: "RFID Mapping",
-          href: tabHref(role, "vehicle-rfid"),
+          href: tabHref(session, "vehicle-rfid"),
           tabBarIcon: renderTabIcon("car-outline"),
-        }}
-      />
-      <Tabs.Screen
-        name="user-creation"
-        options={{
-          title: TITLES["user-creation"],
-          tabBarLabel: "User Register",
-          href: tabHref(role, "user-creation"),
-          tabBarIcon: renderTabIcon("account-plus-outline"),
         }}
       />
       <Tabs.Screen
@@ -163,7 +209,7 @@ export default function TabsLayout() {
         options={{
           title: TITLES["device-creation"],
           tabBarLabel: "Register Device",
-          href: tabHref(role, "device-creation"),
+          href: tabHref(session, "device-creation"),
           tabBarIcon: renderTabIcon("cellphone-cog"),
         }}
       />
@@ -172,7 +218,7 @@ export default function TabsLayout() {
         options={{
           title: TITLES["trip-start"],
           tabBarLabel: "Trip Start",
-          href: tabHref(role, "trip-start"),
+          href: tabHref(session, "trip-start"),
           tabBarIcon: renderTabIcon("flag-outline"),
         }}
       />
@@ -181,7 +227,7 @@ export default function TabsLayout() {
         options={{
           title: TITLES["trip-end"],
           tabBarLabel: "Trip End",
-          href: tabHref(role, "trip-end"),
+          href: tabHref(session, "trip-end"),
           tabBarIcon: renderTabIcon("flag-checkered"),
         }}
       />
@@ -190,17 +236,17 @@ export default function TabsLayout() {
         options={{
           title: TITLES.history,
           tabBarLabel: "History",
-          href: tabHref(role, "history"),
+          href: tabHref(session, "history"),
           tabBarIcon: renderTabIcon("history"),
         }}
       />
       <Tabs.Screen
-        name="more"
+        name="user-creation"
         options={{
-          title: TITLES.more,
-          tabBarLabel: "More",
-          href: tabHref(role, "more"),
-          tabBarIcon: renderTabIcon("dots-horizontal-circle-outline"),
+          title: TITLES["user-creation"],
+          tabBarLabel: "User Register",
+          href: tabHref(session, "user-creation"),
+          tabBarIcon: renderTabIcon("account-plus-outline"),
         }}
       />
     </Tabs>
@@ -211,38 +257,67 @@ const styles = StyleSheet.create({
   headerWrap: {
     position: "relative",
     elevation: 8,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.18,
-    shadowRadius: 10,
+    shadowColor: "#001A38",
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.22,
+    shadowRadius: 14,
+  },
+  // Rounded on its own corners (not the wrapper) so the shadow above is
+  // never fighting an overflow:hidden clip on Android.
+  headerGradient: {
+    ...StyleSheet.absoluteFillObject,
+    borderBottomLeftRadius: Radius.xl,
+    borderBottomRightRadius: Radius.xl,
+  },
+  // A single soft ambient highlight in the top-right corner — restrained,
+  // not a repeating pattern.
+  headerGlow: {
+    position: "absolute",
+    top: -46,
+    right: -30,
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    backgroundColor: "rgba(255,255,255,0.14)",
   },
   appbar: {
     backgroundColor: "transparent",
   },
   headerIconBadge: {
-    width: 34,
-    height: 34,
-    borderRadius: 12,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     marginLeft: 12,
-    backgroundColor: "rgba(255,255,255,0.18)",
+    backgroundColor: "rgba(255,255,255,0.16)",
+    borderWidth: 1.5,
+    borderColor: "rgba(255,255,255,0.35)",
     alignItems: "center",
     justifyContent: "center",
   },
+  headerBadge: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    marginHorizontal: 8,
+    backgroundColor: "rgba(255,255,255,0.14)",
+  },
   appbarContent: {
-    marginLeft: 4,
+    marginLeft: 6,
   },
   appbarTitle: {
     fontWeight: "800",
     fontSize: 19,
-    letterSpacing: 0.2,
+    letterSpacing: 0.3,
   },
   tabBar: {
     position: "absolute",
     left: 14,
     right: 14,
-    bottom: 14,
-    backgroundColor: Colors.white,
-    borderTopWidth: 0,
+    // bottom is set dynamically from useSafeAreaInsets() so the floating bar
+    // clears the gesture-nav/home-indicator area on every device.
+    backgroundColor: "transparent",
+    borderWidth: 1,
+    borderColor: "rgba(0,82,152,0.08)",
     borderRadius: Radius.xl,
     height: 68,
     paddingTop: 8,
@@ -254,6 +329,10 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.16,
     shadowRadius: 22,
   },
+  tabBarGradient: {
+    flex: 1,
+    borderRadius: Radius.xl,
+  },
   tabBarLabel: {
     fontSize: 10.5,
     fontWeight: "700",
@@ -262,6 +341,11 @@ const styles = StyleSheet.create({
   tabBarItem: {
     paddingTop: 0,
     borderRadius: Radius.lg,
+  },
+  tabButtonInner: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
   },
   iconPill: {
     paddingHorizontal: 14,

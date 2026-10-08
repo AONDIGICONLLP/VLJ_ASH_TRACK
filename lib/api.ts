@@ -23,12 +23,9 @@ async function apiRequest<TResponse extends ApiEnvelope>(
   if (token) headers.Authorization = `Bearer ${token}`;
   const url = `${API_BASE_URL}${path}`;
   const method = init.method ?? "GET";
-  // Debug aid: confirms the exact Authorization header value sent on the
-  // wire — check Metro/device logs if a call is unexpectedly unauthenticated.
-  console.log(`[api] ${method} ${url} Authorization=${headers.Authorization ?? "(none)"}`);
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  const timeoutId = setTimeout(() => controller.abort(), 120000);
 
   let response: Response;
   try {
@@ -58,6 +55,34 @@ async function apiRequest<TResponse extends ApiEnvelope>(
   return data;
 }
 
+const CACHE_TTL_MS = 60_000;
+
+// Wraps a fetcher with a short-lived cache and in-flight de-duplication —
+// used for stable reference lists (vehicles, zones) that multiple screens
+// request independently. A failed fetch is never cached, so the next call
+// simply retries against the network.
+function createCachedFetcher<T>(fetcher: () => Promise<T>) {
+  let cache: { data: T; expiresAt: number } | null = null;
+  let inFlight: Promise<T> | null = null;
+
+  return function cachedFetch(): Promise<T> {
+    if (cache && Date.now() < cache.expiresAt) {
+      return Promise.resolve(cache.data);
+    }
+    if (!inFlight) {
+      inFlight = fetcher()
+        .then((data) => {
+          cache = { data, expiresAt: Date.now() + CACHE_TTL_MS };
+          return data;
+        })
+        .finally(() => {
+          inFlight = null;
+        });
+    }
+    return inFlight;
+  };
+}
+
 export type LoginPermission = {
   name: string;
   shortCode: string;
@@ -81,7 +106,7 @@ export type LoginResponse = ApiEnvelope & {
 export async function loginApi(username: string, password: string) {
   const deviceID = await getDeviceId();
   const result = await apiRequest<LoginResponse>(
-    "api/v1/user/login/",
+    "user/login/",
     { method: "POST", body: { username, password, deviceID } },
     "Login failed."
   );
@@ -103,7 +128,7 @@ export type RegisterUserParams = {
 
 export async function registerApi(params: RegisterUserParams): Promise<string> {
   const result = await apiRequest<RegisterResponse>(
-    "api/v1/user/register/",
+    "user/register/",
     { method: "POST", body: params },
     "Registration failed."
   );
@@ -117,19 +142,129 @@ export type RolesResponse = ApiEnvelope & {
 // Returns the active role names for the authenticated account — the
 // register form's Role ID field must be one of these.
 export async function getRolesApi(): Promise<string[]> {
-  const result = await apiRequest<RolesResponse>("api/v1/roles/", {}, "Could not load roles.");
+  const result = await apiRequest<RolesResponse>("roles/", {}, "Could not load roles.");
   return result.data.map((r) => r.role).filter(Boolean);
 }
 
-export type MapRfidResponse = ApiEnvelope;
+export type HistoryUser = {
+  id: number;
+  roleID: number;
+  username: string;
+  name: string;
+  email: string;
+  phone: string;
+  company: string;
+  isActive: number;
+  createdAt: string;
+  updatedAt: string | null;
+};
 
-export async function mapRfidApi(vehicleNo: string, rfid: string) {
-  const result = await apiRequest<MapRfidResponse>(
-    "api/v1/rfid/",
-    { method: "POST", body: { deviceID: vehicleNo, rfid } },
+export type HistoryRfid = {
+  id: number;
+  deviceID: string;
+  rfid: string;
+  isActive: number;
+  createdAt: string;
+  updatedAt: string | null;
+};
+
+export type HistoryReader = {
+  id: number;
+  readerID: string;
+  zoneID: string;
+  isActive: number;
+  createdAt: string;
+  updatedAt: string | null;
+};
+
+// The trip-record shape isn't documented yet (the live endpoint has only
+// ever returned an empty array) — kept loose rather than guessing fields.
+export type HistoryTrip = Record<string, unknown>;
+
+export type UserHistory = {
+  users: HistoryUser[];
+  trips: HistoryTrip[];
+  rfid: HistoryRfid[];
+  readers: HistoryReader[];
+};
+
+export type UserHistoryResponse = ApiEnvelope & {
+  data: UserHistory;
+};
+
+export async function getUserHistoryApi(): Promise<UserHistory> {
+  const result = await apiRequest<UserHistoryResponse>(
+    "user/history/",
+    {},
+    "Could not load history."
+  );
+  return {
+    users: result.data.users ?? [],
+    trips: result.data.trips ?? [],
+    rfid: result.data.rfid ?? [],
+    readers: result.data.readers ?? [],
+  };
+}
+
+export type MultipleRfidResponse = ApiEnvelope & {
+  data: {
+    deviceID: string;
+    inserted: string[];
+    ignored: string[];
+    failed: string[];
+  };
+};
+
+// Maps one or more RFID tags to a single vehicle/device in one call —
+// mappings that already exist are ignored server-side rather than erroring.
+export async function mapMultipleRfidApi(
+  deviceID: string,
+  rfid: string[]
+): Promise<MultipleRfidResponse["data"]> {
+  const result = await apiRequest<MultipleRfidResponse>(
+    "multiplerfid/",
+    { method: "POST", body: { deviceID, rfid } },
     "RFID mapping failed."
   );
-  return result.message ?? "";
+  return result.data;
+}
+
+type RfidVehicleMatch = { rfid: string; deviceID: string };
+
+export type MultipleRfidVehiclesResponse = ApiEnvelope & {
+  // The live endpoint returns a bare object (not an array) when there's only
+  // one match, despite the documented shape always being an array.
+  data: RfidVehicleMatch | RfidVehicleMatch[];
+};
+
+// Resolves the vehicle (deviceID) mapped to each of the given RFID tags in
+// one call — used by the trip-end screen's "Via RFID" method. A tag with no
+// mapping is simply absent from the returned map.
+export async function getVehiclesByRfidApi(rfid: string[]): Promise<Record<string, string>> {
+  const result = await apiRequest<MultipleRfidVehiclesResponse>(
+    "multiplerfidVehicles/",
+    { method: "POST", body: { rfid } },
+    "Could not find vehicles for these RFID tags."
+  );
+  const items = Array.isArray(result.data) ? result.data : [result.data];
+  const map: Record<string, string> = {};
+  items.forEach((item) => {
+    if (item?.rfid && item?.deviceID) map[item.rfid] = item.deviceID;
+  });
+  return map;
+}
+
+export type ImageFlagResponse = ApiEnvelope & {
+  data: { rfid: string; imageRequired: string | number; mapped: number };
+};
+
+export async function getImageRequiredApi(rfid: string): Promise<boolean> {
+  const result = await apiRequest<ImageFlagResponse>(
+    "getImageFlag/",
+    { method: "POST", body: { rfid } },
+    "Could not check image requirement for this RFID."
+  );
+  return String(result.data.imageRequired) === "0";
 }
 
 // The deployed endpoint currently returns { deviceID } items instead of the
@@ -141,11 +276,33 @@ export type VehiclesResponse = ApiEnvelope & {
   data: RawVehicle[];
 };
 
-export async function getVehiclesApi(): Promise<string[]> {
-  const result = await apiRequest<VehiclesResponse>("api/v1/vehicles/", {}, "Could not load vehicles.");
+async function fetchVehicles(): Promise<string[]> {
+  const result = await apiRequest<VehiclesResponse>("vehicles/", {}, "Could not load vehicles.");
   return result.data
     .map((v) => (v.vehiclenumber ?? v.deviceID ?? "").toUpperCase())
     .filter(Boolean);
+}
+
+export const getVehiclesApi = createCachedFetcher(fetchVehicles);
+
+export type VehicleTag = {
+  rfid: string;
+  isActive: number;
+};
+
+export type VehicleTagsResponse = ApiEnvelope & {
+  data: VehicleTag[];
+};
+
+// Looks up the RFID tags mapped to a given vehicle (deviceID) — used to
+// populate the tag picker once a vehicle is selected on the trip-end screen.
+export async function getVehicleTagsApi(deviceID: string): Promise<VehicleTag[]> {
+  const result = await apiRequest<VehicleTagsResponse>(
+    "vehicleTags/",
+    { method: "POST", body: { deviceID } },
+    "Could not load RFID tags."
+  );
+  return result.data;
 }
 
 export type ZoneType = "Circle" | "Polygon";
@@ -177,8 +334,8 @@ export type ZonesResponse = ApiEnvelope & {
   data: RawZone[];
 };
 
-export async function getZonesApi(): Promise<Zone[]> {
-  const result = await apiRequest<ZonesResponse>("api/v1/zones/", {}, "Could not load zones.");
+async function fetchZones(): Promise<Zone[]> {
+  const result = await apiRequest<ZonesResponse>("zones/", {}, "Could not load zones.");
   return result.data.map((z) => ({
     zoneId: z.zoneId ?? z.zoneID ?? "",
     zoneName: z.zoneName || undefined,
@@ -187,6 +344,10 @@ export async function getZonesApi(): Promise<Zone[]> {
     latLong: z.latLong || undefined,
   }));
 }
+
+// Same rationale as getVehiclesApi above — device registration and More both
+// load the full zone list independently.
+export const getZonesApi = createCachedFetcher(fetchZones);
 
 export function parseZoneCoordinates(
   latLong: string | undefined
@@ -204,39 +365,54 @@ export function parseZoneCoordinates(
 
 export type ReaderResponse = ApiEnvelope;
 
-// Trip end is its own endpoint (api/v1/trip/), separate from the reader
-// registration endpoint below (api/v1/reader/). Multipart because of the
+const MAX_TRIP_IMAGE_BYTES = 2 * 1024 * 1024;
+
+// Trip end is its own endpoint (trip/), separate from the reader
+// registration endpoint below (reader/). Multipart because of the
 // optional vehicle photo — no Content-Type header is set for it, so
 // fetch/RN generate the correct boundary themselves.
+//
+// deviceID/rfid are both optional per the API (the server can derive one
+// from the other), but the caller should always send at least one — the
+// trip-end screen resolves this by requiring a vehicle + tag selection
+// before it ever calls this function.
 export async function submitTripEndApi(params: {
-  deviceID: string;
-  rfid: string;
   readerID: string;
-  latitude: number;
-  longitude: number;
-  endTimestamp: number;
+  endTimestamp: string;
+  latitude: string;
+  longitude: string;
+  rfid?: string;
+  deviceID?: string;
   imageUri?: string;
 }): Promise<string> {
   const form = new FormData();
-  form.append("deviceID", params.deviceID);
-  form.append("rfid", params.rfid);
   form.append("readerID", params.readerID);
-  form.append("latitude", String(params.latitude));
-  form.append("longitude", String(params.longitude));
-  form.append("endTimestamp", String(params.endTimestamp));
+  form.append("endTimestamp", params.endTimestamp);
+  form.append("latitude", params.latitude);
+  form.append("longitude", params.longitude);
+  if (params.rfid) form.append("rfid", params.rfid);
+  if (params.deviceID) form.append("deviceID", params.deviceID);
 
   if (params.imageUri) {
     const filename = params.imageUri.split("/").pop() || "trip-end.jpg";
     const extension = filename.split(".").pop()?.toLowerCase();
-    const type = extension === "png" ? "image/png" : "image/jpeg";
-    form.append(
-      "image",
-      { uri: params.imageUri, name: filename, type } as unknown as Blob
-    );
+    const type =
+      extension === "png" ? "image/png" : extension === "jpg" || extension === "jpeg" ? "image/jpeg" : null;
+    if (!type) {
+      throw new ApiError("Only JPG, JPEG and PNG images are allowed.");
+    }
+
+    const fileResponse = await fetch(params.imageUri);
+    const blob = await fileResponse.blob();
+    if (blob.size > MAX_TRIP_IMAGE_BYTES) {
+      throw new ApiError("Maximum allowed image size is 2 MB.");
+    }
+
+    form.append("image", { uri: params.imageUri, name: filename, type } as unknown as Blob);
   }
 
   const result = await apiRequest<ReaderResponse>(
-    "api/v1/trip/",
+    "trip/",
     { method: "POST", form },
     "Trip end submission failed."
   );
@@ -244,11 +420,19 @@ export async function submitTripEndApi(params: {
 }
 
 // Registers this handheld reader against a zone — readerID (this device's own
-// hardware ID) and zoneID (the selected zone).
-export async function registerDeviceApi(readerID: string, zoneID: string): Promise<string> {
+// hardware ID) and zoneID (the selected zone). imageRequired is inverted per
+// the API's own contract: 0 means an image IS required, 1 means it is NOT.
+export async function registerDeviceApi(
+  readerID: string,
+  zoneID: string,
+  imageRequired: 0 | 1
+): Promise<string> {
   const result = await apiRequest<ReaderResponse>(
-    "api/v1/reader/",
-    { method: "POST", body: { readerID: readerID.trim(), zoneID: zoneID.trim() } },
+    "reader/",
+    {
+      method: "POST",
+      body: { readerID: readerID.trim(), zoneID: zoneID.trim(), imageRequired },
+    },
     "Device registration failed."
   );
   return result.message ?? "";

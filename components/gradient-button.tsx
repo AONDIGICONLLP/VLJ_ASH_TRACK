@@ -12,6 +12,7 @@ type Props = {
   icon?: keyof typeof MaterialCommunityIcons.glyphMap;
   colors?: [string, string];
   fullWidth?: boolean;
+  compact?: boolean;
 };
 
 export function GradientButton({
@@ -22,6 +23,7 @@ export function GradientButton({
   icon,
   colors = Gradients.primaryButton,
   fullWidth,
+  compact,
 }: Props) {
   const isDisabled = disabled || loading;
 
@@ -35,7 +37,7 @@ export function GradientButton({
         colors={colors}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 0 }}
-        style={styles.gradient}
+        style={[styles.gradient, compact && styles.gradientCompact]}
       >
         {loading ? (
           <ActivityIndicator color={Colors.white} size="small" />
@@ -71,6 +73,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.lg,
     alignItems: "center",
     justifyContent: "center",
+  },
+  gradientCompact: {
+    paddingVertical: 8,
   },
   content: {
     flexDirection: "row",

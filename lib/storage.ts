@@ -1,6 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import type {
-  AppUser,
   DeviceRecord,
   Session,
   TripRecord,
@@ -10,7 +9,6 @@ import type {
 
 const KEYS = {
   session: "@ash_track/session",
-  users: "@ash_track/users",
   vehicles: "@ash_track/vehicles",
   devices: "@ash_track/devices",
   trips: "@ash_track/trips",
@@ -42,16 +40,6 @@ export async function setSession(session: Session): Promise<void> {
 
 export async function clearSession(): Promise<void> {
   await AsyncStorage.removeItem(KEYS.session);
-}
-
-// ---------- Users / auth ----------
-//
-// Authentication happens entirely against the real backend (see lib/api.ts) —
-// login no longer resolves or bootstraps a local profile/role. This list is
-// only read for the local "Team" count shown in More.
-
-export async function getUsers(): Promise<AppUser[]> {
-  return readList<AppUser>(KEYS.users);
 }
 
 // ---------- Vehicles / RFID tags ----------

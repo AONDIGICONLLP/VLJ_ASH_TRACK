@@ -25,6 +25,11 @@ export const Gradients = {
   secondaryButton: ["#003B70", "#005298"] as [string, string],
   success: ["#588F24", "#71B32F"] as [string, string],
   danger: ["#991B1B", "#DC2626"] as [string, string],
+  // A richer, tighter palette used only for the app icon and the JS splash
+  // screen (components/app-splash.tsx) — deep indigo grounding into a rich
+  // azure and a single vivid teal accent, distinct from the in-app UI
+  // gradients above so headers/buttons elsewhere are unaffected.
+  splash: ["#0B1229", "#0E6BA8", "#14B8A6"] as [string, string, string],
 } as const;
 
 export const Spacing = {
@@ -41,4 +46,13 @@ export const Radius = {
   lg: 24,
   xl: 28,
   pill: 999,
+} as const;
+
+// The floating bottom tab bar's own footprint (app/(tabs)/_layout.tsx),
+// kept here so every screen's scrollable list can reserve enough space to
+// clear it — combined with useSafeAreaInsets().bottom at each call site,
+// since that part varies per device (gesture-nav bar, home indicator, etc).
+export const TabBarMetrics = {
+  height: 68,
+  bottomMargin: 14,
 } as const;
